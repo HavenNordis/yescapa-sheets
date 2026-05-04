@@ -31,11 +31,10 @@ load_dotenv()
 # CONFIGURAÇÃO
 # ---------------------------------------------------------------------------
 
-YESCAPA_EMAIL           = os.environ["YESCAPA_EMAIL"]
-YESCAPA_PASSWORD        = os.environ["YESCAPA_PASSWORD"]
-GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-GOOGLE_SHEET_NAME       = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
-WORKSHEET_NAME          = os.getenv("WORKSHEET_NAME", "Reservas")
+YESCAPA_EMAIL    = os.environ["YESCAPA_EMAIL"]
+YESCAPA_PASSWORD = os.environ["YESCAPA_PASSWORD"]
+GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
+WORKSHEET_NAME    = os.getenv("WORKSHEET_NAME", "Reservas")
 
 YESCAPA_BASE = "https://www.yescapa.pt"
 API_BASE     = "https://api.jelouemoncampingcar.com"
@@ -395,8 +394,13 @@ class SheetsClient:
         "https://www.googleapis.com/auth/drive",
     ]
 
-    def __init__(self, credentials_file: str):
-        creds = Credentials.from_service_account_file(credentials_file, scopes=self.SCOPES)
+    def __init__(self):
+        import json
+        raw = os.environ.get("GOOGLE_CREDENTIALS_JSON") or ""
+        if not raw:
+            raise SystemExit("Variável GOOGLE_CREDENTIALS_JSON não definida.")
+        info = json.loads(raw)
+        creds = Credentials.from_service_account_info(info, scopes=self.SCOPES)
         self.client = gspread.authorize(creds)
 
     def get_or_create_worksheet(self, sheet_name: str, worksheet_name: str):
@@ -494,7 +498,7 @@ def main():
 
     # 4. Guardar no Google Sheets
     print("\n=== Google Sheets ===")
-    sheets = SheetsClient(GOOGLE_CREDENTIALS_FILE)
+    sheets = SheetsClient()
     ws = sheets.get_or_create_worksheet(GOOGLE_SHEET_NAME, WORKSHEET_NAME)
     sheets.update_bookings(ws, bookings)
 
