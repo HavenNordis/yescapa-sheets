@@ -98,11 +98,9 @@ class YescapaPlaywright:
             page.wait_for_timeout(5000)
             print(f"  {len(self._intercepted)} reservas intercetadas na navegação.")
 
-            # 4. Buscar páginas adicionais se existirem (via fetch dentro do browser,
-            #    que já tem a sessão estabelecida neste ponto)
-            if self._total_count > len(self._intercepted):
-                print(f"  Total esperado: {self._total_count}. A recolher páginas restantes...")
-                self._fetch_remaining_pages(page)
+            # 4. Sessão estabelecida — recolher TODOS os estados via fetch()
+            print("A recolher todos os estados de reservas...")
+            self._fetch_all_states(page)
 
             summaries = list(self._intercepted.values())
             print(f"  Total recolhido: {len(summaries)} reservas.")
@@ -149,27 +147,56 @@ class YescapaPlaywright:
         except Exception:
             pass
 
-    def _fetch_remaining_pages(self, page) -> None:
-        """Busca páginas ainda não intercetadas via fetch() dentro do browser."""
-        page_num = 2
-        while len(self._intercepted) < self._total_count:
-            results = page.evaluate(
-                """([apiBase, pageNum]) => fetch(
-                    `${apiBase}/v4/bookings-owner/?page=${pageNum}&page_size=100`,
-                    { credentials: 'include' }
-                ).then(r => r.ok ? r.json() : {results: []})
-                 .then(d => Array.isArray(d) ? d : (d.results || []))
-                """,
-                [API_BASE, page_num],
-            ) or []
-            if not results:
-                break
-            for b in results:
-                bid = b.get("id")
-                if bid:
-                    self._intercepted[bid] = b
-            print(f"  Página {page_num}: {len(results)} reservas.")
-            page_num += 1
+    # Estados conhecidos do Yescapa
+    META_STATES = [None, "confirmed", "pending", "archived", "cancelled", "past", "completed"]
+
+    def _fetch_all_states(self, page) -> None:
+        """
+        Depois da sessão estar estabelecida, percorre todos os meta_states
+        e todas as páginas via fetch() dentro do browser.
+        """
+        for state in self.META_STATES:
+            state_label = state or "sem filtro"
+            page_num = 1
+            state_count = 0
+
+            while True:
+                url_qs = f"?page={page_num}&page_size=100"
+                if state:
+                    url_qs += f"&meta_state={state}"
+
+                results = page.evaluate(
+                    """([apiBase, qs]) => fetch(
+                        `${apiBase}/v4/bookings-owner/${qs}`,
+                        { credentials: 'include' }
+                    ).then(r => r.ok ? r.json() : {results: []})
+                     .then(d => Array.isArray(d) ? d : (d.results || []))
+                    """,
+                    [API_BASE, url_qs],
+                ) or []
+
+                if not results:
+                    break
+
+                new = 0
+                for b in results:
+                    bid = b.get("id")
+                    if bid and bid not in self._intercepted:
+                        self._intercepted[bid] = b
+                        new += 1
+
+                state_count += len(results)
+                if new > 0:
+                    print(f"  [{state_label}] p{page_num}: {len(results)} reservas ({new} novas)")
+
+                # Se devolveu menos que page_size, não há mais páginas
+                if len(results) < 100:
+                    break
+                page_num += 1
+
+            if state_count == 0 and state is not None:
+                # Estado não existe ou sem resultados — continuar
+                pass
 
     def _login(self, page):
         print("A abrir página de login...")
