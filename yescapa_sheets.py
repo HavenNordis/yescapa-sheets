@@ -147,8 +147,8 @@ class YescapaPlaywright:
         except Exception:
             pass
 
-    # Estados conhecidos do Yescapa
-    META_STATES = [None, "confirmed", "pending", "archived", "cancelled", "past", "completed"]
+    # Estados reais da API Yescapa (confirmados via inspecção)
+    META_STATES = ["confirmed", "waiting", "todo", "cancelled", "archived"]
 
     def _fetch_all_states(self, page) -> None:
         """
