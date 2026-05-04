@@ -1,29 +1,27 @@
 """
 Yescapa → Google Sheets
-Faz login via Playwright, captura o token Bearer, depois usa requests
-para chamar a API jelouemoncampingcar.com e buscar detalhes completos
-de cada reserva, guardando tudo num Google Sheet.
+Faz login via Playwright e usa page.evaluate(fetch()) para chamar a API
+diretamente dentro do browser — sem replicar autenticação externamente.
 
 Pré-requisitos:
-  pip install playwright requests gspread google-auth python-dotenv
+  pip install playwright gspread google-auth python-dotenv
   playwright install chromium
 
 Google Cloud:
   1. Criar projeto em console.cloud.google.com
   2. Ativar "Google Sheets API" e "Google Drive API"
-  3. Criar Service Account → descarregar JSON → guardar como credentials.json
+  3. Criar Service Account → conteúdo JSON em GOOGLE_CREDENTIALS_JSON
   4. Partilhar o Google Sheet com o email da Service Account
 """
 
+import json
 import os
-import re
-import requests as req_lib
 from datetime import datetime
 
 import gspread
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright, Request as PWRequest
+from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
@@ -31,8 +29,8 @@ load_dotenv()
 # CONFIGURAÇÃO
 # ---------------------------------------------------------------------------
 
-YESCAPA_EMAIL    = os.environ["YESCAPA_EMAIL"]
-YESCAPA_PASSWORD = os.environ["YESCAPA_PASSWORD"]
+YESCAPA_EMAIL     = os.environ["YESCAPA_EMAIL"]
+YESCAPA_PASSWORD  = os.environ["YESCAPA_PASSWORD"]
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 WORKSHEET_NAME    = os.getenv("WORKSHEET_NAME", "Reservas")
 
@@ -40,62 +38,60 @@ YESCAPA_BASE = "https://www.yescapa.pt"
 API_BASE     = "https://api.jelouemoncampingcar.com"
 HEADLESS     = os.getenv("HEADLESS", "false").lower() == "true"
 
-# Estados a recolher. None = sem filtro (todos os estados).
-# Se a API não suportar sem filtro, tenta cada estado individualmente.
-META_STATES  = [None, "confirmed", "pending", "cancelled", "completed", "past"]
-
-# Páginas do Yescapa que carregam reservas e disparam chamadas à API
-BOOKING_PAGES = [
-    "/mes-locations/",
-    "/mes-locations/reservations/",
-    "/owner/bookings/",
-    "/proprietario/reservas/",
-    "/bookings/owner/",
-]
 
 # ---------------------------------------------------------------------------
-# FASE 1 — Login via Playwright e captura do token
+# YESCAPA — tudo dentro do Playwright
 # ---------------------------------------------------------------------------
 
-def get_auth_token() -> str:
-    """
-    Faz login, navega para a página de reservas (que dispara chamadas à API)
-    e captura o token por 3 vias em cascata:
-      1. Header Authorization dos pedidos intercetados
-      2. localStorage / sessionStorage do browser
-      3. Cookie de sessão usado como Bearer
-    """
-    token = None
+class YescapaPlaywright:
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=HEADLESS, slow_mo=80)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            locale="pt-PT",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
-        page = context.new_page()
+    def run(self) -> list[dict]:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                locale="pt-PT",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
 
-        # --- Via 1: interceta TODOS os pedidos para capturar Authorization ---
-        def on_request(request: PWRequest):
-            nonlocal token
-            if token:
-                return
-            if "jelouemoncampingcar.com" not in request.url:
-                return
-            headers = request.all_headers()
-            auth = headers.get("authorization", "")
-            if auth.lower().startswith("bearer "):
-                token = auth
-                print(f"  [via request] Token capturado: {auth[:40]}...")
+            # 1. Login
+            self._login(page)
 
-        page.on("request", on_request)
+            # 2. Navegar para a página de reservas e aguardar carregamento completo
+            print("A navegar para página de reservas...")
+            page.goto(f"{YESCAPA_BASE}/d/bookings", wait_until="networkidle", timeout=30_000)
+            page.wait_for_timeout(3000)
+            print(f"  URL: {page.url}")
 
-        # --- Login ---
+            # 3. Buscar lista completa via fetch() dentro do browser (tem auth automática)
+            print("A recolher lista de reservas...")
+            summaries = self._fetch_all_summaries(page)
+            print(f"  {len(summaries)} reservas encontradas.")
+
+            if not summaries:
+                browser.close()
+                raise SystemExit("Nenhuma reserva encontrada. Verifica se o login funcionou.")
+
+            # 4. Buscar detalhes de cada reserva dentro do mesmo contexto autenticado
+            print(f"A recolher detalhes de {len(summaries)} reservas...")
+            detailed = []
+            for i, summary in enumerate(summaries, 1):
+                bid = summary.get("id")
+                detail = self._fetch_detail(page, bid) if bid else {}
+                detailed.append({**summary, **detail})
+                if i % 10 == 0 or i == len(summaries):
+                    print(f"  {i}/{len(summaries)} processadas.")
+
+            browser.close()
+
+        return detailed
+
+    def _login(self, page):
         print("A abrir página de login...")
         page.goto(f"{YESCAPA_BASE}/conexao/", wait_until="domcontentloaded", timeout=30_000)
         page.wait_for_timeout(1500)
@@ -113,7 +109,7 @@ def get_auth_token() -> str:
             except Exception:
                 pass
 
-        # Preencher formulário
+        # Email
         for selector in ["input[type='email']", "input[name='email']", "#id_email", "#email"]:
             try:
                 page.fill(selector, YESCAPA_EMAIL, timeout=5000)
@@ -121,6 +117,7 @@ def get_auth_token() -> str:
             except Exception:
                 pass
 
+        # Password
         for selector in ["input[type='password']", "input[name='password']", "#id_password", "#password"]:
             try:
                 page.fill(selector, YESCAPA_PASSWORD, timeout=5000)
@@ -128,6 +125,7 @@ def get_auth_token() -> str:
             except Exception:
                 pass
 
+        # Submeter
         for selector in [
             "button[type='submit']", "input[type='submit']",
             "button:has-text('Entrar')", "button:has-text('Se connecter')",
@@ -138,7 +136,7 @@ def get_auth_token() -> str:
             except Exception:
                 pass
 
-        # Aguardar redirect pós-login
+        # Aguardar redirect
         print("A aguardar autenticação...")
         try:
             page.wait_for_function(
@@ -146,183 +144,59 @@ def get_auth_token() -> str:
                 "!window.location.pathname.includes('login')",
                 timeout=20_000,
             )
-            print(f"Login bem-sucedido. URL: {page.url}")
+            print(f"  Login bem-sucedido. URL: {page.url}")
         except Exception:
-            print(f"Aviso: URL após login: {page.url}")
+            print(f"  Aviso: URL após login: {page.url}")
 
         page.wait_for_timeout(2000)
 
-        # Navegar para as páginas de reservas para disparar as chamadas à API
-        print("A navegar para reservas (para forçar chamadas à API)...")
-        for path in BOOKING_PAGES:
-            if token:
-                break
-            try:
-                page.goto(f"{YESCAPA_BASE}{path}", wait_until="domcontentloaded", timeout=15_000)
-                page.wait_for_timeout(3000)
-                print(f"  Carregada: {page.url}")
-            except Exception:
-                pass
-
-        # --- Via 2: procurar token no localStorage / sessionStorage ---
-        if not token:
-            print("  A procurar token no localStorage/sessionStorage...")
-            token = page.evaluate("""() => {
-                const keys = ['token', 'access_token', 'jwt', 'auth_token',
-                              'userToken', 'authToken', 'Bearer'];
-                for (const store of [localStorage, sessionStorage]) {
-                    for (const key of keys) {
-                        const v = store.getItem(key);
-                        if (v && v.length > 20) return 'Bearer ' + v;
-                    }
-                    // Percorrer todas as chaves do storage
-                    for (let i = 0; i < store.length; i++) {
-                        const k = store.key(i);
-                        const v = store.getItem(k);
-                        if (v && (v.startsWith('eyJ') || v.length > 100)) {
-                            return 'Bearer ' + v;
+    def _fetch_all_summaries(self, page) -> list[dict]:
+        """
+        Chama a API de listagem dentro do browser (que tem os cookies de sessão)
+        e itera todas as páginas.
+        """
+        return page.evaluate(
+            """(apiBase) => {
+                return (async () => {
+                    const all = [];
+                    let pageNum = 1;
+                    while (true) {
+                        const r = await fetch(
+                            `${apiBase}/v4/bookings-owner/?page=${pageNum}&page_size=100`,
+                            { credentials: 'include' }
+                        );
+                        if (!r.ok) {
+                            console.log('Lista API status:', r.status);
+                            break;
                         }
+                        const data = await r.json();
+                        const results = Array.isArray(data) ? data : (data.results || []);
+                        all.push(...results);
+                        if (!data.next || results.length === 0) break;
+                        pageNum = (typeof data.next === 'number') ? data.next : pageNum + 1;
                     }
-                }
-                return null;
-            }""")
-            if token:
-                print(f"  [via localStorage] Token encontrado: {token[:40]}...")
-
-        # --- Via 3: cookies do contexto → tentar usá-los como auth ---
-        if not token:
-            print("  A extrair cookies para usar como autenticação...")
-            all_cookies = context.cookies()
-            # Guardar cookies para a sessão requests (usado em fallback na API)
-            token = _cookies_to_header(all_cookies)
-            if token:
-                print(f"  [via cookies] Sessão capturada: {token[:40]}...")
-
-        browser.close()
-
-    if not token:
-        raise SystemExit(
-            "Não foi possível capturar autenticação.\n"
-            "Confirma que o login funciona manualmente no browser."
+                    return all;
+                })();
+            }""",
+            API_BASE,
         )
 
-    return token
-
-
-def _cookies_to_header(cookies: list[dict]) -> str | None:
-    """Formata cookies de sessão como string para o header Cookie."""
-    relevant = {
-        c["name"]: c["value"]
-        for c in cookies
-        if any(k in c["name"].lower() for k in ["session", "token", "auth", "jwt", "user"])
-    }
-    if not relevant:
-        # fallback: todos os cookies do domínio yescapa/jeloue
-        relevant = {
-            c["name"]: c["value"]
-            for c in cookies
-            if "yescapa" in c.get("domain", "") or "jeloue" in c.get("domain", "")
-        }
-    if relevant:
-        return "cookie:" + "; ".join(f"{k}={v}" for k, v in relevant.items())
-    return None
-
-
-# ---------------------------------------------------------------------------
-# FASE 2 — Chamadas diretas à API com requests
-# ---------------------------------------------------------------------------
-
-class YescapaAPI:
-    def __init__(self, auth_token: str):
-        self.session = req_lib.Session()
-        self.session.headers.update({
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Origin": YESCAPA_BASE,
-            "Referer": YESCAPA_BASE,
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        })
-        # Suporta "Bearer <jwt>", "Token <token>", ou "cookie:<name>=<val>;..."
-        if auth_token.startswith("cookie:"):
-            for pair in auth_token[7:].split(";"):
-                pair = pair.strip()
-                if "=" in pair:
-                    name, _, value = pair.partition("=")
-                    self.session.cookies.set(name.strip(), value.strip())
-            print("  Autenticação via cookies configurada.")
-        else:
-            self.session.headers["Authorization"] = auth_token
-            print(f"  Autenticação via header: {auth_token[:40]}...")
-
-    def get_all_bookings(self) -> list[dict]:
-        """Recolhe todos os IDs/dados sumários de todos os estados."""
-        all_bookings: dict[int, dict] = {}  # id → dados, para deduplicar
-
-        for state in META_STATES:
-            params = {"page_size": 100}
-            if state:
-                params["meta_state"] = state
-
-            base_url = f"{API_BASE}/v4/bookings-owner/"
-            state_label = state or "todos"
-            page_num = 1
-
-            while True:
-                # Construir params: página 1 usa params completos; seguintes só mudam "page"
-                current_params = {**params, "page": page_num} if page_num > 1 else params
-                resp = self.session.get(base_url, params=current_params, timeout=20)
-                if resp.status_code == 401:
-                    print(f"  Autenticação inválida (401). Estado: {state_label}")
-                    break
-                if resp.status_code not in (200, 201):
-                    # Estado provavelmente não existe — ignorar silenciosamente
-                    break
-
-                data = resp.json()
-                results = data if isinstance(data, list) else data.get("results", [])
-
-                for b in results:
-                    bid = b.get("id")
-                    if bid and bid not in all_bookings:
-                        all_bookings[bid] = b
-
-                # Paginação: "next" pode ser URL completo, número de página, ou null
-                if not isinstance(data, dict):
-                    break
-                next_val = data.get("next")
-                if not next_val:
-                    break
-                if isinstance(next_val, str) and next_val.startswith("http"):
-                    # URL completo — extrair número de página para manter consistência
-                    import urllib.parse
-                    qs = urllib.parse.urlparse(next_val).query
-                    qs_params = urllib.parse.parse_qs(qs)
-                    page_num = int(qs_params.get("page", [page_num + 1])[0])
-                else:
-                    # Número de página direto (int ou string)
-                    page_num = int(next_val)
-                print(f"    [{state_label}] página {page_num}...")
-
-            if all_bookings and state is None:
-                # Sem filtro já trouxe tudo — não precisamos de iterar estados
-                break
-
-        print(f"Total de reservas únicas (sumário): {len(all_bookings)}")
-        return list(all_bookings.values())
-
-    def get_booking_detail(self, booking_id: int) -> dict:
-        """Busca os detalhes completos de uma reserva."""
-        resp = self.session.get(
-            f"{API_BASE}/v4/bookings-owner/{booking_id}/",
-            timeout=20,
+    def _fetch_detail(self, page, booking_id: int) -> dict:
+        """Busca detalhes completos de uma reserva dentro do contexto autenticado."""
+        result = page.evaluate(
+            """([apiBase, bid]) => {
+                return (async () => {
+                    const r = await fetch(
+                        `${apiBase}/v4/bookings-owner/${bid}/`,
+                        { credentials: 'include' }
+                    );
+                    if (!r.ok) return {};
+                    return await r.json();
+                })();
+            }""",
+            [API_BASE, booking_id],
         )
-        if resp.status_code == 200:
-            return resp.json()
-        return {}
+        return result or {}
 
 
 # ---------------------------------------------------------------------------
@@ -336,10 +210,7 @@ def parse_booking(raw: dict) -> dict:
     insurance = raw.get("insurance") or {}
     pickup    = raw.get("pickup") or {}
     dropoff   = raw.get("dropoff") or {}
-    extensions = raw.get("extensions") or {}
 
-    date_from = raw.get("date_from", "")
-    date_to   = raw.get("date_to", "")
     hour_from = raw.get("hour_from")
     hour_to   = raw.get("hour_to")
 
@@ -347,9 +218,9 @@ def parse_booking(raw: dict) -> dict:
         "ID":                    raw.get("id"),
         "Estado":                raw.get("state"),
         "Estado Meta":           raw.get("meta_state"),
-        "Data Início":           _fmt_date(date_from),
+        "Data Início":           _fmt_date(raw.get("date_from")),
         "Hora Início":           pickup.get("time") or (f"{hour_from}:00" if hour_from is not None else ""),
-        "Data Fim":              _fmt_date(date_to),
+        "Data Fim":              _fmt_date(raw.get("date_to")),
         "Hora Fim":              dropoff.get("time") or (f"{hour_to}:00" if hour_to is not None else ""),
         "Nº Dias":               raw.get("nb_days"),
         "Hóspede Nome":          guest.get("first_name"),
@@ -395,12 +266,10 @@ class SheetsClient:
     ]
 
     def __init__(self):
-        import json
         raw = os.environ.get("GOOGLE_CREDENTIALS_JSON") or ""
         if not raw:
             raise SystemExit("Variável GOOGLE_CREDENTIALS_JSON não definida.")
-        info = json.loads(raw)
-        creds = Credentials.from_service_account_info(info, scopes=self.SCOPES)
+        creds = Credentials.from_service_account_info(json.loads(raw), scopes=self.SCOPES)
         self.client = gspread.authorize(creds)
 
     def get_or_create_worksheet(self, sheet_name: str, worksheet_name: str):
@@ -449,16 +318,7 @@ def _fmt_date(value) -> str:
     return str(value)
 
 
-def _nested(d, *keys):
-    for k in keys:
-        if not isinstance(d, dict):
-            return None
-        d = d.get(k)
-    return d
-
-
 def _col_letter(n: int) -> str:
-    """Converte número de coluna (1-based) para letra (A, B, ..., Z, AA, ...)."""
     result = ""
     while n:
         n, r = divmod(n - 1, 26)
@@ -471,36 +331,17 @@ def _col_letter(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 def main():
-    # 1. Login e captura do token
-    print("=== Login Yescapa ===")
-    auth_token = get_auth_token()
+    print("=== Yescapa → Google Sheets ===")
 
-    # 2. Recolher lista de reservas
-    print("\n=== A recolher reservas ===")
-    api = YescapaAPI(auth_token)
-    summary_list = api.get_all_bookings()
+    # 1. Login + recolha de dados (tudo dentro do browser)
+    detailed = YescapaPlaywright().run()
+    print(f"Total: {len(detailed)} reservas.")
 
-    if not summary_list:
-        raise SystemExit("Nenhuma reserva encontrada na API.")
-
-    # 3. Buscar detalhes de cada reserva
-    print(f"\nA recolher detalhes de {len(summary_list)} reservas...")
-    detailed = []
-    for i, booking in enumerate(summary_list, 1):
-        bid = booking.get("id")
-        detail = api.get_booking_detail(bid) if bid else {}
-        merged = {**booking, **detail}
-        detailed.append(merged)
-        if i % 10 == 0 or i == len(summary_list):
-            print(f"  {i}/{len(summary_list)} reservas processadas.")
-
-    bookings = [parse_booking(b) for b in detailed]
-
-    # 4. Guardar no Google Sheets
+    # 2. Guardar no Google Sheets
     print("\n=== Google Sheets ===")
     sheets = SheetsClient()
     ws = sheets.get_or_create_worksheet(GOOGLE_SHEET_NAME, WORKSHEET_NAME)
-    sheets.update_bookings(ws, bookings)
+    sheets.update_bookings(ws, [parse_booking(b) for b in detailed])
 
     print("\nConcluído!")
 
