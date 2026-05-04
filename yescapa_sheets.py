@@ -46,6 +46,10 @@ HEADLESS     = os.getenv("HEADLESS", "false").lower() == "true"
 class YescapaPlaywright:
 
     def run(self) -> list[dict]:
+        # Recolhe respostas intercetadas durante a navegação
+        self._intercepted: dict[int, dict] = {}
+        self._total_count: int = 0
+
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
             context = browser.new_context(
@@ -59,25 +63,55 @@ class YescapaPlaywright:
             )
             page = context.new_page()
 
+            # Registar listener ANTES do login para não perder nenhuma chamada
+            page.on("response", self._on_api_response)
+
             # 1. Login
             self._login(page)
 
-            # 2. Navegar para a página de reservas e aguardar carregamento completo
+            # 2. Navegar para a página de reservas
             print("A navegar para página de reservas...")
-            page.goto(f"{YESCAPA_BASE}/d/bookings", wait_until="networkidle", timeout=30_000)
-            page.wait_for_timeout(3000)
+            page.goto(
+                f"{YESCAPA_BASE}/d/bookings",
+                wait_until="networkidle",
+                timeout=30_000,
+            )
             print(f"  URL: {page.url}")
 
-            # 3. Buscar lista completa via fetch() dentro do browser (tem auth automática)
-            print("A recolher lista de reservas...")
-            summaries = self._fetch_all_summaries(page)
-            print(f"  {len(summaries)} reservas encontradas.")
+            # 3. Aguardar explicitamente pela primeira resposta da API de reservas
+            print("A aguardar resposta da API de reservas...")
+            try:
+                page.wait_for_response(
+                    lambda r: (
+                        "jelouemoncampingcar.com/v4/bookings-owner" in r.url
+                        and "/bookings-owner/" not in r.url.split("?")[0].rstrip("/").replace(
+                            "bookings-owner", ""
+                        )
+                    ),
+                    timeout=20_000,
+                )
+                print("  Resposta intercetada.")
+            except Exception as e:
+                print(f"  Aviso: {e}")
+
+            # Buffer extra para garantir que respostas tardias são capturadas
+            page.wait_for_timeout(5000)
+            print(f"  {len(self._intercepted)} reservas intercetadas na navegação.")
+
+            # 4. Buscar páginas adicionais se existirem (via fetch dentro do browser,
+            #    que já tem a sessão estabelecida neste ponto)
+            if self._total_count > len(self._intercepted):
+                print(f"  Total esperado: {self._total_count}. A recolher páginas restantes...")
+                self._fetch_remaining_pages(page)
+
+            summaries = list(self._intercepted.values())
+            print(f"  Total recolhido: {len(summaries)} reservas.")
 
             if not summaries:
                 browser.close()
                 raise SystemExit("Nenhuma reserva encontrada. Verifica se o login funcionou.")
 
-            # 4. Buscar detalhes de cada reserva dentro do mesmo contexto autenticado
+            # 5. Buscar detalhes de cada reserva
             print(f"A recolher detalhes de {len(summaries)} reservas...")
             detailed = []
             for i, summary in enumerate(summaries, 1):
@@ -90,6 +124,52 @@ class YescapaPlaywright:
             browser.close()
 
         return detailed
+
+    def _on_api_response(self, response) -> None:
+        """Captura respostas da API de listagem durante a navegação."""
+        url = response.url
+        if "jelouemoncampingcar.com/v4/bookings-owner" not in url:
+            return
+        # Ignorar endpoints de detalhe (terminam em /<id>/)
+        import re
+        if re.search(r"/bookings-owner/\d+/", url):
+            return
+        try:
+            data = response.json()
+            results = data.get("results", []) if isinstance(data, dict) else (
+                data if isinstance(data, list) else []
+            )
+            if isinstance(data, dict) and data.get("count"):
+                self._total_count = data["count"]
+            for b in results:
+                bid = b.get("id")
+                if bid:
+                    self._intercepted[bid] = b
+            print(f"  [API] {len(results)} reservas de: ...{url[-60:]}")
+        except Exception:
+            pass
+
+    def _fetch_remaining_pages(self, page) -> None:
+        """Busca páginas ainda não intercetadas via fetch() dentro do browser."""
+        page_num = 2
+        while len(self._intercepted) < self._total_count:
+            results = page.evaluate(
+                """([apiBase, pageNum]) => fetch(
+                    `${apiBase}/v4/bookings-owner/?page=${pageNum}&page_size=100`,
+                    { credentials: 'include' }
+                ).then(r => r.ok ? r.json() : {results: []})
+                 .then(d => Array.isArray(d) ? d : (d.results || []))
+                """,
+                [API_BASE, page_num],
+            ) or []
+            if not results:
+                break
+            for b in results:
+                bid = b.get("id")
+                if bid:
+                    self._intercepted[bid] = b
+            print(f"  Página {page_num}: {len(results)} reservas.")
+            page_num += 1
 
     def _login(self, page):
         print("A abrir página de login...")
@@ -150,50 +230,14 @@ class YescapaPlaywright:
 
         page.wait_for_timeout(2000)
 
-    def _fetch_all_summaries(self, page) -> list[dict]:
-        """
-        Chama a API de listagem dentro do browser (que tem os cookies de sessão)
-        e itera todas as páginas.
-        """
-        return page.evaluate(
-            """(apiBase) => {
-                return (async () => {
-                    const all = [];
-                    let pageNum = 1;
-                    while (true) {
-                        const r = await fetch(
-                            `${apiBase}/v4/bookings-owner/?page=${pageNum}&page_size=100`,
-                            { credentials: 'include' }
-                        );
-                        if (!r.ok) {
-                            console.log('Lista API status:', r.status);
-                            break;
-                        }
-                        const data = await r.json();
-                        const results = Array.isArray(data) ? data : (data.results || []);
-                        all.push(...results);
-                        if (!data.next || results.length === 0) break;
-                        pageNum = (typeof data.next === 'number') ? data.next : pageNum + 1;
-                    }
-                    return all;
-                })();
-            }""",
-            API_BASE,
-        )
-
     def _fetch_detail(self, page, booking_id: int) -> dict:
         """Busca detalhes completos de uma reserva dentro do contexto autenticado."""
         result = page.evaluate(
-            """([apiBase, bid]) => {
-                return (async () => {
-                    const r = await fetch(
-                        `${apiBase}/v4/bookings-owner/${bid}/`,
-                        { credentials: 'include' }
-                    );
-                    if (!r.ok) return {};
-                    return await r.json();
-                })();
-            }""",
+            """([apiBase, bid]) => fetch(
+                `${apiBase}/v4/bookings-owner/${bid}/`,
+                { credentials: 'include' }
+            ).then(r => r.ok ? r.json() : {})
+            """,
             [API_BASE, booking_id],
         )
         return result or {}
