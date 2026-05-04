@@ -1,0 +1,8 @@
+.env
+credentials.json
+debug_*.html
+debug_*.json
+__pycache__/
+*.pyc
+venv/
+.venv/

@@ -1,0 +1,30 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+# Cron job 1: verificar email a cada 15 minutos
+[[services]]
+name = "email-trigger"
+
+  [services.deploy]
+  cronSchedule = "*/15 * * * *"
+  startCommand = "python run.py --email"
+  restartPolicyType = "never"
+
+# Cron job 2a: sync diário às 08:00 UTC (09:00 Lisboa inverno / 10:00 verão)
+[[services]]
+name = "sync-morning"
+
+  [services.deploy]
+  cronSchedule = "0 8 * * *"
+  startCommand = "python run.py --scheduled"
+  restartPolicyType = "never"
+
+# Cron job 2b: sync diário às 20:00 UTC (21:00 Lisboa inverno / 22:00 verão)
+[[services]]
+name = "sync-evening"
+
+  [services.deploy]
+  cronSchedule = "0 20 * * *"
+  startCommand = "python run.py --scheduled"
+  restartPolicyType = "never"
