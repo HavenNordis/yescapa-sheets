@@ -45,15 +45,24 @@ HEADLESS     = os.getenv("HEADLESS", "false").lower() == "true"
 
 class YescapaPlaywright:
 
-    # Conjunto alargado — inclui candidatos além dos 5 conhecidos
-    META_STATES = [
-        "confirmed", "waiting", "todo", "cancelled", "archived",
-        "in_progress",  # reservas atualmente em curso
+    # Combinações (meta_state, state) a recolher.
+    # state=None → sem filtro de sub-estado (devolve tudo do meta_state).
+    # archived é dividido pelos sub-estados conhecidos para garantir paginação correcta.
+    FETCH_STATES: list[tuple[str, str | None]] = [
+        ("confirmed",   None),
+        ("waiting",     None),
+        ("todo",        None),
+        ("cancelled",   None),
+        ("archived",    "TO_COME"),
+        ("archived",    "CANCELLED_GUEST"),
+        ("archived",    "CANCELLED_OWNER"),
+        ("archived",    "CANCELLED_BOTH"),
+        ("in_progress", None),
     ]
 
     def run(self) -> list[dict]:
         self._intercepted: dict[int, dict] = {}
-        self._api_counts: dict[str, int] = {}  # total reportado pela API por meta_state
+        self._api_counts: dict[str, int] = {}  # chave: "meta_state" ou "meta_state/state"
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -72,9 +81,9 @@ class YescapaPlaywright:
             # 1. Login
             self._login(page)
 
-            # 2. Percorrer todos os meta_states com paginação
-            for meta_state in self.META_STATES:
-                self._collect_state(page, meta_state)
+            # 2. Percorrer todas as combinações com paginação
+            for meta_state, state in self.FETCH_STATES:
+                self._collect_state(page, meta_state, state)
 
             summaries = list(self._intercepted.values())
             print(f"\nTotal recolhido: {len(summaries)} reservas.")
@@ -99,10 +108,14 @@ class YescapaPlaywright:
 
         return detailed
 
-    def _collect_state(self, page, meta_state: str) -> None:
-        """Carrega a página do meta_state e pagina via clique até capturar tudo."""
-        print(f"\nA recolher meta_state='{meta_state}'...")
-        url = f"{YESCAPA_BASE}/d/bookings?meta_state={meta_state}"
+    def _collect_state(self, page, meta_state: str, state: str | None = None) -> None:
+        """Carrega a página do meta_state (+ sub-estado opcional) e pagina via clique."""
+        key = f"{meta_state}/{state}" if state else meta_state
+        label = f"meta_state={meta_state}" + (f"&state={state}" if state else "")
+        print(f"\nA recolher {label}...")
+
+        params = f"meta_state={meta_state}" + (f"&state={state}" if state else "")
+        url = f"{YESCAPA_BASE}/d/bookings?{params}"
         try:
             page.goto(url, wait_until="networkidle", timeout=30_000)
             try:
@@ -114,12 +127,16 @@ class YescapaPlaywright:
                 pass
             page.wait_for_timeout(2000)
         except Exception as e:
-            print(f"  [{meta_state}] erro ao carregar: {e}")
+            print(f"  [{key}] erro ao carregar: {e}")
             return
 
-        api_total = self._api_counts.get(meta_state, 0)
-        captured = sum(1 for b in self._intercepted.values() if b.get("meta_state") == meta_state)
-        print(f"  [{meta_state}] p1: {captured}/{api_total or '?'} capturadas")
+        api_total = self._api_counts.get(key, 0)
+        captured = sum(
+            1 for b in self._intercepted.values()
+            if b.get("meta_state") == meta_state
+            and (state is None or b.get("state") == state)
+        )
+        print(f"  [{key}] p1: {captured}/{api_total or '?'} capturadas")
 
         # Paginar via clique enquanto a API reportar mais reservas do que capturámos
         page_num = 2
@@ -145,7 +162,7 @@ class YescapaPlaywright:
             }""")
 
             if not clicked:
-                print(f"  [{meta_state}] botão próxima página não encontrado (p{page_num})")
+                print(f"  [{key}] botão próxima página não encontrado (p{page_num})")
                 break
 
             try:
@@ -158,8 +175,12 @@ class YescapaPlaywright:
             page.wait_for_timeout(2000)
 
             new = len(self._intercepted) - before
-            captured = sum(1 for b in self._intercepted.values() if b.get("meta_state") == meta_state)
-            print(f"  [{meta_state}] p{page_num}: +{new} | {captured}/{api_total} capturadas")
+            captured = sum(
+                1 for b in self._intercepted.values()
+                if b.get("meta_state") == meta_state
+                and (state is None or b.get("state") == state)
+            )
+            print(f"  [{key}] p{page_num}: +{new} | {captured}/{api_total} capturadas")
 
             if new == 0:
                 break
@@ -181,10 +202,11 @@ class YescapaPlaywright:
             data = response.json()
             if isinstance(data, dict) and "count" in data:
                 ms_m = re.search(r"meta_state=([^&]+)", url)
+                st_m = re.search(r"[?&]state=([^&]+)", url)
                 if ms_m:
-                    ms = ms_m.group(1)
-                    self._api_counts[ms] = data["count"]
-                    print(f"    API [{ms}]: count={data['count']}, endpoint={url.split('?')[0].split('/')[-2]}/")
+                    key = ms_m.group(1) + (f"/{st_m.group(1)}" if st_m else "")
+                    self._api_counts[key] = data["count"]
+                    print(f"    API [{key}]: count={data['count']}")
             results = data if isinstance(data, list) else data.get("results", [])
             for b in results:
                 bid = b.get("id")
