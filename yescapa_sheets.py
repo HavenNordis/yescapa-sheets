@@ -100,42 +100,68 @@ class YescapaPlaywright:
         return detailed
 
     def _collect_state(self, page, meta_state: str) -> None:
-        """Navega pelas páginas de um meta_state até capturar todas as reservas."""
+        """Carrega a página do meta_state e pagina via clique até capturar tudo."""
         print(f"\nA recolher meta_state='{meta_state}'...")
-        page_num = 1
-        while True:
-            url = f"{YESCAPA_BASE}/d/bookings?meta_state={meta_state}&page={page_num}"
-            before = len(self._intercepted)
+        url = f"{YESCAPA_BASE}/d/bookings?meta_state={meta_state}"
+        try:
+            page.goto(url, wait_until="networkidle", timeout=30_000)
             try:
-                page.goto(url, wait_until="networkidle", timeout=30_000)
-                try:
-                    page.wait_for_response(
-                        lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
-                        timeout=12_000,
-                    )
-                except Exception:
-                    pass
-                page.wait_for_timeout(2000)
-            except Exception as e:
-                print(f"  [{meta_state}] p{page_num} erro: {e}")
+                page.wait_for_response(
+                    lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
+                    timeout=12_000,
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+        except Exception as e:
+            print(f"  [{meta_state}] erro ao carregar: {e}")
+            return
+
+        api_total = self._api_counts.get(meta_state, 0)
+        captured = sum(1 for b in self._intercepted.values() if b.get("meta_state") == meta_state)
+        print(f"  [{meta_state}] p1: {captured}/{api_total or '?'} capturadas")
+
+        # Paginar via clique enquanto a API reportar mais reservas do que capturámos
+        page_num = 2
+        while api_total > 0 and captured < api_total and page_num <= 50:
+            before = len(self._intercepted)
+
+            # Procura o botão "próxima página" por texto, aria-label ou classe
+            clicked = page.evaluate("""() => {
+                const isNext = el => {
+                    const t = (el.textContent || '').trim();
+                    const a = (el.getAttribute('aria-label') || '').toLowerCase();
+                    const c = (el.className || '').toLowerCase();
+                    return !el.disabled && el.offsetParent !== null && (
+                        a.includes('next') || a.includes('suivant') ||
+                        a.includes('próxim') || a.includes('prochaine') ||
+                        c.includes('next') || c.includes('forward') ||
+                        t === '›' || t === '>' || t === '»' || t === '→'
+                    );
+                };
+                const btn = [...document.querySelectorAll('button,a')].find(isNext);
+                if (btn) { btn.click(); return true; }
+                return false;
+            }""")
+
+            if not clicked:
+                print(f"  [{meta_state}] botão próxima página não encontrado (p{page_num})")
                 break
+
+            try:
+                page.wait_for_response(
+                    lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
+                    timeout=10_000,
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
 
             new = len(self._intercepted) - before
-            api_total = self._api_counts.get(meta_state, 0)
-            captured = sum(
-                1 for b in self._intercepted.values()
-                if b.get("meta_state") == meta_state
-            )
-            if api_total:
-                print(f"  [{meta_state}] p{page_num}: +{new} | {captured}/{api_total} capturadas")
-            else:
-                print(f"  [{meta_state}] p{page_num}: +{new} (total geral: {len(self._intercepted)})")
+            captured = sum(1 for b in self._intercepted.values() if b.get("meta_state") == meta_state)
+            print(f"  [{meta_state}] p{page_num}: +{new} | {captured}/{api_total} capturadas")
 
-            # Para se não chegaram reservas novas
             if new == 0:
-                break
-            # Para se já temos tudo o que a API reporta
-            if api_total > 0 and captured >= api_total:
                 break
             page_num += 1
 
@@ -143,17 +169,22 @@ class YescapaPlaywright:
         """Intercepta respostas da API de listagem feitas pela SPA."""
         import re
         url = response.url
-        if "jelouemoncampingcar.com/v4/bookings-owner" not in url:
+        if "jelouemoncampingcar.com" not in url:
             return
-        if re.search(r"/bookings-owner/\d+/", url):
+        # Captura qualquer endpoint de reservas (bookings-owner, bookings, etc.)
+        if not re.search(r"/v4/booking", url):
+            return
+        # Exclui endpoints de detalhe individual (ex: /bookings-owner/123/)
+        if re.search(r"/v\d+/booking[^?]*/\d+/", url):
             return
         try:
             data = response.json()
-            # Guardar total reportado pela API para controlo de paginação
             if isinstance(data, dict) and "count" in data:
                 ms_m = re.search(r"meta_state=([^&]+)", url)
                 if ms_m:
-                    self._api_counts[ms_m.group(1)] = data["count"]
+                    ms = ms_m.group(1)
+                    self._api_counts[ms] = data["count"]
+                    print(f"    API [{ms}]: count={data['count']}, endpoint={url.split('?')[0].split('/')[-2]}/")
             results = data if isinstance(data, list) else data.get("results", [])
             for b in results:
                 bid = b.get("id")
