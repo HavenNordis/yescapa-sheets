@@ -45,11 +45,16 @@ HEADLESS     = os.getenv("HEADLESS", "false").lower() == "true"
 
 class YescapaPlaywright:
 
-    # Estados reais da API Yescapa
-    META_STATES = ["confirmed", "waiting", "todo", "cancelled", "archived"]
+    # Secções do painel de reservas do Yescapa e os estados que carregam
+    SECTIONS = [
+        (f"{YESCAPA_BASE}/d/bookings",           "confirmed"),
+        (f"{YESCAPA_BASE}/d/bookings/past",      "archived"),
+        (f"{YESCAPA_BASE}/d/bookings/requests",  "waiting/todo"),
+        (f"{YESCAPA_BASE}/d/bookings/cancelled", "cancelled"),
+    ]
 
     def run(self) -> list[dict]:
-        self._auth_header: str = ""
+        self._intercepted: dict[int, dict] = {}
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -63,82 +68,39 @@ class YescapaPlaywright:
                 ),
             )
             page = context.new_page()
-            page.on("request", self._on_api_request)
+            page.on("response", self._on_api_response)
 
             # 1. Login
             self._login(page)
 
-            # 2. Navegar para a página de reservas — a SPA faz pedidos à API,
-            #    permitindo capturar o token de autenticação (Authorization header)
-            print("A estabelecer sessão com a API...")
-            page.goto(f"{YESCAPA_BASE}/d/bookings", wait_until="networkidle", timeout=30_000)
-            try:
-                page.wait_for_response(
-                    lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
-                    timeout=20_000,
-                )
-                print("  Sessão com API confirmada.")
-            except Exception:
-                print("  Aviso: não foi possível confirmar sessão com API.")
-            page.wait_for_timeout(3000)
-
-            if self._auth_header:
-                print("  Token de autenticação capturado.")
-            else:
-                print("  Aviso: token não capturado, a usar cookies.")
-
-            # 3. Buscar todas as reservas por estado via fetch() dentro do browser.
-            #    O fetch() corre no contexto autenticado da página yescapa.pt e envia
-            #    o token de autenticação capturado — funciona para todos os estados.
-            all_bookings: dict[int, dict] = {}
-            for state in self.META_STATES:
-                print(f"\nA recolher estado: {state}")
-                page_num = 1
-                while True:
-                    api_url = (
-                        f"{API_BASE}/v4/bookings-owner/"
-                        f"?meta_state={state}&page={page_num}&page_size=100"
-                    )
+            # 2. Navegar para cada secção do painel — a SPA faz chamadas à API
+            #    com o meta_state correspondente, que são interceptadas pelo listener
+            for url, label in self.SECTIONS:
+                before = len(self._intercepted)
+                print(f"\nA carregar secção '{label}' ({url})...")
+                try:
+                    page.goto(url, wait_until="networkidle", timeout=30_000)
                     try:
-                        result = page.evaluate(
-                            """([url, authHeader]) => fetch(url, {
-                                credentials: 'include',
-                                headers: authHeader ? { 'Authorization': authHeader } : {}
-                            }).then(r => r.ok ? r.json() : null)
-                            """,
-                            [api_url, self._auth_header],
+                        page.wait_for_response(
+                            lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
+                            timeout=15_000,
                         )
-                    except Exception as e:
-                        print(f"  [{state}] Erro: {e}")
-                        break
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(2000)
+                except Exception as e:
+                    print(f"  Aviso: {e}")
+                new = len(self._intercepted) - before
+                print(f"  {new} novas reservas (total acumulado: {len(self._intercepted)})")
 
-                    if not result:
-                        print(f"  [{state}] página {page_num}: sem dados")
-                        break
-
-                    items = result if isinstance(result, list) else result.get("results", [])
-                    added = 0
-                    for b in items:
-                        bid = b.get("id")
-                        if bid and bid not in all_bookings:
-                            all_bookings[bid] = b
-                            added += 1
-                    print(f"  [{state}] página {page_num}: {added} novas ({len(items)} na página)")
-                    if not items:
-                        break
-                    has_next = isinstance(result, dict) and result.get("next")
-                    if not has_next:
-                        break
-                    page_num += 1
-
-            summaries = list(all_bookings.values())
+            summaries = list(self._intercepted.values())
             print(f"\nTotal recolhido: {len(summaries)} reservas.")
 
             if not summaries:
                 browser.close()
                 raise SystemExit("Nenhuma reserva encontrada. Verifica se o login funcionou.")
 
-            # 4. Buscar detalhes de cada reserva
+            # 3. Buscar detalhes de cada reserva
             print(f"A recolher detalhes de {len(summaries)} reservas...")
             detailed = []
             for i, summary in enumerate(summaries, 1):
@@ -152,12 +114,23 @@ class YescapaPlaywright:
 
         return detailed
 
-    def _on_api_request(self, request) -> None:
-        """Captura o token de autenticação dos pedidos da SPA à API."""
-        if "jelouemoncampingcar.com" in request.url:
-            auth = request.headers.get("authorization")
-            if auth and not self._auth_header:
-                self._auth_header = auth
+    def _on_api_response(self, response) -> None:
+        """Intercepta respostas da API de listagem feitas pela SPA."""
+        import re
+        url = response.url
+        if "jelouemoncampingcar.com/v4/bookings-owner" not in url:
+            return
+        if re.search(r"/bookings-owner/\d+/", url):
+            return
+        try:
+            data = response.json()
+            results = data if isinstance(data, list) else data.get("results", [])
+            for b in results:
+                bid = b.get("id")
+                if bid and bid not in self._intercepted:
+                    self._intercepted[bid] = b
+        except Exception:
+            pass
 
     def _login(self, page):
         print("A abrir página de login...")
@@ -221,15 +194,12 @@ class YescapaPlaywright:
     def _fetch_detail(self, page, booking_id: int) -> dict:
         """Busca detalhes completos de uma reserva dentro do contexto autenticado."""
         result = page.evaluate(
-            """([apiBase, bid, authHeader]) => fetch(
+            """([apiBase, bid]) => fetch(
                 `${apiBase}/v4/bookings-owner/${bid}/`,
-                {
-                    credentials: 'include',
-                    headers: authHeader ? { 'Authorization': authHeader } : {}
-                }
+                { credentials: 'include' }
             ).then(r => r.ok ? r.json() : {})
             """,
-            [API_BASE, booking_id, self._auth_header],
+            [API_BASE, booking_id],
         )
         return result or {}
 
