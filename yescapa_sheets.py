@@ -45,10 +45,11 @@ HEADLESS     = os.getenv("HEADLESS", "false").lower() == "true"
 
 class YescapaPlaywright:
 
+    # Estados reais da API Yescapa
+    META_STATES = ["confirmed", "waiting", "todo", "cancelled", "archived"]
+
     def run(self) -> list[dict]:
-        # Recolhe respostas intercetadas durante a navegação
         self._intercepted: dict[int, dict] = {}
-        self._total_count: int = 0
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -62,54 +63,23 @@ class YescapaPlaywright:
                 ),
             )
             page = context.new_page()
-
-            # Registar listener ANTES do login para não perder nenhuma chamada
             page.on("response", self._on_api_response)
 
             # 1. Login
             self._login(page)
 
-            # 2. Navegar para a página de reservas
-            print("A navegar para página de reservas...")
-            page.goto(
-                f"{YESCAPA_BASE}/d/bookings",
-                wait_until="networkidle",
-                timeout=30_000,
-            )
-            print(f"  URL: {page.url}")
-
-            # 3. Aguardar explicitamente pela primeira resposta da API de reservas
-            print("A aguardar resposta da API de reservas...")
-            try:
-                page.wait_for_response(
-                    lambda r: (
-                        "jelouemoncampingcar.com/v4/bookings-owner" in r.url
-                        and "/bookings-owner/" not in r.url.split("?")[0].rstrip("/").replace(
-                            "bookings-owner", ""
-                        )
-                    ),
-                    timeout=20_000,
-                )
-                print("  Resposta intercetada.")
-            except Exception as e:
-                print(f"  Aviso: {e}")
-
-            # Buffer extra para garantir que respostas tardias são capturadas
-            page.wait_for_timeout(5000)
-            print(f"  {len(self._intercepted)} reservas intercetadas na navegação.")
-
-            # 4. Sessão estabelecida — recolher TODOS os estados via fetch()
-            print("A recolher todos os estados de reservas...")
-            self._fetch_all_states(page)
+            # 2. Navegar para cada estado separadamente e intercetar respostas
+            for state in self.META_STATES:
+                self._load_state(page, state)
 
             summaries = list(self._intercepted.values())
-            print(f"  Total recolhido: {len(summaries)} reservas.")
+            print(f"\nTotal recolhido: {len(summaries)} reservas.")
 
             if not summaries:
                 browser.close()
                 raise SystemExit("Nenhuma reserva encontrada. Verifica se o login funcionou.")
 
-            # 5. Buscar detalhes de cada reserva
+            # 3. Buscar detalhes de cada reserva
             print(f"A recolher detalhes de {len(summaries)} reservas...")
             detailed = []
             for i, summary in enumerate(summaries, 1):
@@ -123,80 +93,75 @@ class YescapaPlaywright:
 
         return detailed
 
+    def _load_state(self, page, state: str) -> None:
+        """Navega para a página do estado, aguarda a resposta da API e captura todas as páginas."""
+        url = f"{YESCAPA_BASE}/d/bookings?meta_state={state}"
+        print(f"\nA carregar estado: {state}")
+
+        before = len(self._intercepted)
+
+        page.goto(url, wait_until="networkidle", timeout=30_000)
+
+        # Aguardar explicitamente a resposta da API para este estado
+        try:
+            page.wait_for_response(
+                lambda r: (
+                    "jelouemoncampingcar.com/v4/bookings-owner" in r.url
+                    and f"meta_state={state}" in r.url
+                ),
+                timeout=15_000,
+            )
+        except Exception:
+            pass  # Pode não haver reservas neste estado
+
+        page.wait_for_timeout(2000)
+
+        after = len(self._intercepted)
+        found = after - before
+        print(f"  [{state}] {found} reservas intercetadas.")
+
+        # Se a página carregou mais resultados que os intercetados (paginação),
+        # buscar páginas adicionais navegando pelo URL da API directamente
+        page_num = 2
+        while True:
+            api_url = (
+                f"{API_BASE}/v4/bookings-owner/"
+                f"?meta_state={state}&page={page_num}&page_size=100"
+            )
+            before_page = len(self._intercepted)
+            page.goto(api_url, wait_until="domcontentloaded", timeout=15_000)
+            page.wait_for_timeout(1000)
+            after_page = len(self._intercepted)
+            new = after_page - before_page
+            if new == 0:
+                break
+            print(f"  [{state}] página {page_num}: {new} reservas.")
+            page_num += 1
+
+        # Voltar à página do Yescapa para manter a sessão activa
+        page.goto(f"{YESCAPA_BASE}/d/bookings", wait_until="domcontentloaded", timeout=15_000)
+        page.wait_for_timeout(1000)
+
     def _on_api_response(self, response) -> None:
         """Captura respostas da API de listagem durante a navegação."""
+        import re
         url = response.url
         if "jelouemoncampingcar.com/v4/bookings-owner" not in url:
             return
-        # Ignorar endpoints de detalhe (terminam em /<id>/)
-        import re
         if re.search(r"/bookings-owner/\d+/", url):
             return
         try:
             data = response.json()
-            results = data.get("results", []) if isinstance(data, dict) else (
-                data if isinstance(data, list) else []
+            results = (
+                data if isinstance(data, list)
+                else data.get("results", [])
             )
-            if isinstance(data, dict) and data.get("count"):
-                self._total_count = data["count"]
             for b in results:
                 bid = b.get("id")
-                if bid:
+                if bid and bid not in self._intercepted:
                     self._intercepted[bid] = b
-            print(f"  [API] {len(results)} reservas de: ...{url[-60:]}")
         except Exception:
             pass
-
-    # Estados reais da API Yescapa (confirmados via inspecção)
-    META_STATES = ["confirmed", "waiting", "todo", "cancelled", "archived"]
-
-    def _fetch_all_states(self, page) -> None:
-        """
-        Depois da sessão estar estabelecida, percorre todos os meta_states
-        e todas as páginas via fetch() dentro do browser.
-        """
-        for state in self.META_STATES:
-            state_label = state or "sem filtro"
-            page_num = 1
-            state_count = 0
-
-            while True:
-                url_qs = f"?page={page_num}&page_size=100"
-                if state:
-                    url_qs += f"&meta_state={state}"
-
-                results = page.evaluate(
-                    """([apiBase, qs]) => fetch(
-                        `${apiBase}/v4/bookings-owner/${qs}`,
-                        { credentials: 'include' }
-                    ).then(r => r.ok ? r.json() : {results: []})
-                     .then(d => Array.isArray(d) ? d : (d.results || []))
-                    """,
-                    [API_BASE, url_qs],
-                ) or []
-
-                if not results:
-                    break
-
-                new = 0
-                for b in results:
-                    bid = b.get("id")
-                    if bid and bid not in self._intercepted:
-                        self._intercepted[bid] = b
-                        new += 1
-
-                state_count += len(results)
-                if new > 0:
-                    print(f"  [{state_label}] p{page_num}: {len(results)} reservas ({new} novas)")
-
-                # Se devolveu menos que page_size, não há mais páginas
-                if len(results) < 100:
-                    break
-                page_num += 1
-
-            if state_count == 0 and state is not None:
-                # Estado não existe ou sem resultados — continuar
-                pass
 
     def _login(self, page):
         print("A abrir página de login...")
