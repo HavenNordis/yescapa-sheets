@@ -45,13 +45,7 @@ HEADLESS     = os.getenv("HEADLESS", "false").lower() == "true"
 
 class YescapaPlaywright:
 
-    # Secções do painel de reservas do Yescapa e os estados que carregam
-    SECTIONS = [
-        (f"{YESCAPA_BASE}/d/bookings",           "confirmed"),
-        (f"{YESCAPA_BASE}/d/bookings/past",      "archived"),
-        (f"{YESCAPA_BASE}/d/bookings/requests",  "waiting/todo"),
-        (f"{YESCAPA_BASE}/d/bookings/cancelled", "cancelled"),
-    ]
+    META_STATES = ["confirmed", "waiting", "todo", "cancelled", "archived"]
 
     def run(self) -> list[dict]:
         self._intercepted: dict[int, dict] = {}
@@ -73,25 +67,36 @@ class YescapaPlaywright:
             # 1. Login
             self._login(page)
 
-            # 2. Navegar para cada secção do painel — a SPA faz chamadas à API
-            #    com o meta_state correspondente, que são interceptadas pelo listener
-            for url, label in self.SECTIONS:
-                before = len(self._intercepted)
-                print(f"\nA carregar secção '{label}' ({url})...")
-                try:
-                    page.goto(url, wait_until="networkidle", timeout=30_000)
+            # 2. Navegar para cada meta_state com paginação.
+            #    O URL ?meta_state=X&page=N faz a SPA chamar a API com esses parâmetros;
+            #    sem filtro de state, a SPA devolve todas as reservas do meta_state.
+            for meta_state in self.META_STATES:
+                print(f"\nA recolher meta_state='{meta_state}'...")
+                page_num = 1
+                while True:
+                    url = (
+                        f"{YESCAPA_BASE}/d/bookings"
+                        f"?meta_state={meta_state}&page={page_num}"
+                    )
+                    before = len(self._intercepted)
                     try:
-                        page.wait_for_response(
-                            lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
-                            timeout=15_000,
-                        )
-                    except Exception:
-                        pass
-                    page.wait_for_timeout(2000)
-                except Exception as e:
-                    print(f"  Aviso: {e}")
-                new = len(self._intercepted) - before
-                print(f"  {new} novas reservas (total acumulado: {len(self._intercepted)})")
+                        page.goto(url, wait_until="networkidle", timeout=30_000)
+                        try:
+                            page.wait_for_response(
+                                lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
+                                timeout=15_000,
+                            )
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(2000)
+                    except Exception as e:
+                        print(f"  [{meta_state}] p{page_num} erro: {e}")
+                        break
+                    new = len(self._intercepted) - before
+                    print(f"  [{meta_state}] p{page_num}: {new} novas (total: {len(self._intercepted)})")
+                    if new == 0:
+                        break
+                    page_num += 1
 
             summaries = list(self._intercepted.values())
             print(f"\nTotal recolhido: {len(summaries)} reservas.")
