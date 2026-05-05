@@ -45,10 +45,15 @@ HEADLESS     = os.getenv("HEADLESS", "false").lower() == "true"
 
 class YescapaPlaywright:
 
-    META_STATES = ["confirmed", "waiting", "todo", "cancelled", "archived"]
+    # Conjunto alargado — inclui candidatos além dos 5 conhecidos
+    META_STATES = [
+        "confirmed", "waiting", "todo", "cancelled", "archived",
+        "in_progress",  # reservas atualmente em curso
+    ]
 
     def run(self) -> list[dict]:
         self._intercepted: dict[int, dict] = {}
+        self._api_counts: dict[str, int] = {}  # total reportado pela API por meta_state
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -67,39 +72,14 @@ class YescapaPlaywright:
             # 1. Login
             self._login(page)
 
-            # 2. Navegar para cada meta_state com paginação.
-            #    O URL ?meta_state=X&page=N faz a SPA chamar a API com esses parâmetros;
-            #    sem filtro de state, a SPA devolve todas as reservas do meta_state.
+            # 2. Percorrer todos os meta_states com paginação
             for meta_state in self.META_STATES:
-                print(f"\nA recolher meta_state='{meta_state}'...")
-                page_num = 1
-                while True:
-                    url = (
-                        f"{YESCAPA_BASE}/d/bookings"
-                        f"?meta_state={meta_state}&page={page_num}"
-                    )
-                    before = len(self._intercepted)
-                    try:
-                        page.goto(url, wait_until="networkidle", timeout=30_000)
-                        try:
-                            page.wait_for_response(
-                                lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
-                                timeout=15_000,
-                            )
-                        except Exception:
-                            pass
-                        page.wait_for_timeout(2000)
-                    except Exception as e:
-                        print(f"  [{meta_state}] p{page_num} erro: {e}")
-                        break
-                    new = len(self._intercepted) - before
-                    print(f"  [{meta_state}] p{page_num}: {new} novas (total: {len(self._intercepted)})")
-                    if new == 0:
-                        break
-                    page_num += 1
+                self._collect_state(page, meta_state)
 
             summaries = list(self._intercepted.values())
             print(f"\nTotal recolhido: {len(summaries)} reservas.")
+            if self._api_counts:
+                print(f"Totais reportados pela API: {self._api_counts}")
 
             if not summaries:
                 browser.close()
@@ -119,6 +99,46 @@ class YescapaPlaywright:
 
         return detailed
 
+    def _collect_state(self, page, meta_state: str) -> None:
+        """Navega pelas páginas de um meta_state até capturar todas as reservas."""
+        print(f"\nA recolher meta_state='{meta_state}'...")
+        page_num = 1
+        while True:
+            url = f"{YESCAPA_BASE}/d/bookings?meta_state={meta_state}&page={page_num}"
+            before = len(self._intercepted)
+            try:
+                page.goto(url, wait_until="networkidle", timeout=30_000)
+                try:
+                    page.wait_for_response(
+                        lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
+                        timeout=12_000,
+                    )
+                except Exception:
+                    pass
+                page.wait_for_timeout(2000)
+            except Exception as e:
+                print(f"  [{meta_state}] p{page_num} erro: {e}")
+                break
+
+            new = len(self._intercepted) - before
+            api_total = self._api_counts.get(meta_state, 0)
+            captured = sum(
+                1 for b in self._intercepted.values()
+                if b.get("meta_state") == meta_state
+            )
+            if api_total:
+                print(f"  [{meta_state}] p{page_num}: +{new} | {captured}/{api_total} capturadas")
+            else:
+                print(f"  [{meta_state}] p{page_num}: +{new} (total geral: {len(self._intercepted)})")
+
+            # Para se não chegaram reservas novas
+            if new == 0:
+                break
+            # Para se já temos tudo o que a API reporta
+            if api_total > 0 and captured >= api_total:
+                break
+            page_num += 1
+
     def _on_api_response(self, response) -> None:
         """Intercepta respostas da API de listagem feitas pela SPA."""
         import re
@@ -129,6 +149,11 @@ class YescapaPlaywright:
             return
         try:
             data = response.json()
+            # Guardar total reportado pela API para controlo de paginação
+            if isinstance(data, dict) and "count" in data:
+                ms_m = re.search(r"meta_state=([^&]+)", url)
+                if ms_m:
+                    self._api_counts[ms_m.group(1)] = data["count"]
             results = data if isinstance(data, list) else data.get("results", [])
             for b in results:
                 bid = b.get("id")
