@@ -20,7 +20,7 @@ def run_sync(trigger: str):
     log(f"A iniciar sync (trigger: {trigger})...")
     try:
         from yescapa_sheets import main
-        main()
+        main(trigger)
         log("Sync concluído com sucesso.")
     except Exception as e:
         log(f"Erro no sync: {e}")

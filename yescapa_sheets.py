@@ -17,7 +17,7 @@ Google Cloud:
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 import gspread
 from dotenv import load_dotenv
@@ -34,6 +34,7 @@ YESCAPA_EMAIL     = os.environ["YESCAPA_EMAIL"]
 YESCAPA_PASSWORD  = os.environ["YESCAPA_PASSWORD"]
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 WORKSHEET_NAME    = os.getenv("WORKSHEET_NAME", "Reservas")
+LOGSHEET_NAME     = os.getenv("LOGSHEET_NAME", "Log")
 
 YESCAPA_BASE = "https://www.yescapa.pt"
 API_BASE     = "https://api.jelouemoncampingcar.com"
@@ -425,6 +426,22 @@ class SheetsClient:
         worksheet.format(f"A1:{_col_letter(len(headers))}1", {"textFormat": {"bold": True}})
         print(f"{len(bookings)} reservas guardadas no Google Sheets.")
 
+    def update_log(self, sheet_name: str, log_sheet_name: str, trigger: str, n_bookings: int):
+        spreadsheet = self.client.open(sheet_name)
+        headers = ["Data/Hora", "Motivo", "Nº Reservas"]
+        try:
+            ws = spreadsheet.worksheet(log_sheet_name)
+        except gspread.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=log_sheet_name, rows=1000, cols=3)
+            ws.append_row(headers)
+            ws.format("A1:C1", {"textFormat": {"bold": True}})
+            print(f"Separador '{log_sheet_name}' criado.")
+
+        now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
+        motivo = "Email (nova reserva)" if trigger == "email" else "Agendamento"
+        ws.append_row([now, motivo, n_bookings])
+        print(f"Log actualizado: {now} | {motivo} | {n_bookings} reservas")
+
 
 # ---------------------------------------------------------------------------
 # UTILITÁRIOS
@@ -455,7 +472,7 @@ def _col_letter(n: int) -> str:
 # MAIN
 # ---------------------------------------------------------------------------
 
-def main():
+def main(trigger: str = "scheduled"):
     print("=== Yescapa → Google Sheets ===")
 
     # 1. Login + recolha de dados (tudo dentro do browser)
@@ -466,7 +483,9 @@ def main():
     print("\n=== Google Sheets ===")
     sheets = SheetsClient()
     ws = sheets.get_or_create_worksheet(GOOGLE_SHEET_NAME, WORKSHEET_NAME)
-    sheets.update_bookings(ws, [parse_booking(b) for b in detailed])
+    bookings = [parse_booking(b) for b in detailed]
+    sheets.update_bookings(ws, bookings)
+    sheets.update_log(GOOGLE_SHEET_NAME, LOGSHEET_NAME, trigger, len(bookings))
 
     print("\nConcluído!")
 
