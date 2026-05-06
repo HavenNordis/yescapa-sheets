@@ -439,7 +439,11 @@ class SheetsClient:
 
         now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
         motivo = "Email (nova reserva)" if trigger == "email" else "Agendamento"
-        ws.append_row([now, motivo, n_bookings])
+        cell = ws.find(motivo, in_column=2)
+        if cell:
+            ws.update(f"A{cell.row}:C{cell.row}", [[now, motivo, n_bookings]])
+        else:
+            ws.append_row([now, motivo, n_bookings])
         print(f"Log actualizado: {now} | {motivo} | {n_bookings} reservas")
 
 
