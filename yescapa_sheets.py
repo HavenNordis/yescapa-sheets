@@ -53,12 +53,10 @@ class YescapaPlaywright:
         ("confirmed",   None),
         ("waiting",     None),
         ("todo",        None),
-        ("cancelled",   None),
         ("archived",    "TO_COME"),
         ("archived",    "CANCELLED_GUEST"),
         ("archived",    "CANCELLED_OWNER"),
         ("archived",    "CANCELLED_BOTH"),
-        ("in_progress", None),
     ]
 
     def run(self) -> list[dict]:
@@ -315,17 +313,15 @@ class YescapaPlaywright:
         page.wait_for_timeout(2000)
 
     def _fetch_detail(self, page, booking_id: int) -> dict:
-        """Busca detalhes completos de uma reserva dentro do contexto autenticado."""
-        auth = self._api_headers.get("authorization", "")
-        result = page.evaluate(
-            """([apiBase, bid, auth]) => fetch(
-                `${apiBase}/v4/bookings-owner/${bid}/`,
-                { credentials: 'include', headers: auth ? { Authorization: auth } : {} }
-            ).then(r => r.ok ? r.json() : {})
-            """,
-            [API_BASE, booking_id, auth],
-        )
-        return result or {}
+        """Busca detalhes completos de uma reserva."""
+        try:
+            resp = page.request.get(
+                f"{API_BASE}/v4/bookings-owner/{booking_id}/",
+                headers=self._api_headers,
+            )
+            return resp.json() if resp.ok else {}
+        except Exception:
+            return {}
 
 
 # ---------------------------------------------------------------------------
