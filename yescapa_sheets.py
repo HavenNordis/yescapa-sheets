@@ -16,6 +16,7 @@ Google Cloud:
 
 import json
 import os
+import re
 from datetime import datetime
 
 import gspread
@@ -63,6 +64,8 @@ class YescapaPlaywright:
     def run(self) -> list[dict]:
         self._intercepted: dict[int, dict] = {}
         self._api_counts: dict[str, int] = {}  # chave: "meta_state" ou "meta_state/state"
+        self._api_next: dict[str, str] = {}    # chave → URL base da página 1 para construir paginação
+        self._api_headers: dict = {}            # headers capturados do primeiro pedido da SPA à API
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -77,6 +80,7 @@ class YescapaPlaywright:
             )
             page = context.new_page()
             page.on("response", self._on_api_response)
+            page.on("request", self._on_api_request)
 
             # 1. Login
             self._login(page)
@@ -162,8 +166,32 @@ class YescapaPlaywright:
             }""")
 
             if not clicked:
-                print(f"  [{key}] botão próxima página não encontrado (p{page_num})")
-                break
+                base = self._api_next.get(key, "")
+                if base:
+                    next_url = re.sub(r"([?&]page=)\d+", f"\\g<1>{page_num}", base)
+                else:
+                    next_url = f"{API_BASE}/v4/bookings-owner/?{params}&page={page_num}"
+                print(f"  [{key}] botão não encontrado (p{page_num}), fetch directo: {next_url}")
+                resp = page.request.get(next_url, headers=self._api_headers)
+                if not resp.ok:
+                    break
+                api_data = resp.json()
+                results = api_data if isinstance(api_data, list) else api_data.get("results", [])
+                for b in results:
+                    bid = b.get("id")
+                    if bid and bid not in self._intercepted:
+                        self._intercepted[bid] = b
+                new = len(self._intercepted) - before
+                captured = sum(
+                    1 for b in self._intercepted.values()
+                    if b.get("meta_state") == meta_state
+                    and (state is None or b.get("state") == state)
+                )
+                print(f"  [{key}] fetch directo p{page_num}: +{new} | {captured}/{api_total} capturadas")
+                if new == 0:
+                    break
+                page_num += 1
+                continue
 
             try:
                 page.wait_for_response(
@@ -186,9 +214,18 @@ class YescapaPlaywright:
                 break
             page_num += 1
 
+    def _on_api_request(self, request) -> None:
+        """Captura os headers da SPA para reutilizar em fetches directos."""
+        if self._api_headers:
+            return
+        if "jelouemoncampingcar.com/v4/bookings-owner" not in request.url:
+            return
+        # Ignora pseudo-headers e headers geridos pelo browser/rede
+        skip = {"content-length", "connection", "host", ":method", ":path", ":scheme", ":authority"}
+        self._api_headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
+
     def _on_api_response(self, response) -> None:
         """Intercepta respostas da API de listagem feitas pela SPA."""
-        import re
         url = response.url
         if "jelouemoncampingcar.com" not in url:
             return
@@ -206,6 +243,9 @@ class YescapaPlaywright:
                 if ms_m:
                     key = ms_m.group(1) + (f"/{st_m.group(1)}" if st_m else "")
                     self._api_counts[key] = data["count"]
+                    # Guardar o URL real da p1 (com page= e page_size=) para derivar páginas seguintes
+                    if key not in self._api_next and re.search(r"[?&]page=\d+", url):
+                        self._api_next[key] = url
                     print(f"    API [{key}]: count={data['count']}")
             results = data if isinstance(data, list) else data.get("results", [])
             for b in results:
@@ -276,13 +316,14 @@ class YescapaPlaywright:
 
     def _fetch_detail(self, page, booking_id: int) -> dict:
         """Busca detalhes completos de uma reserva dentro do contexto autenticado."""
+        auth = self._api_headers.get("authorization", "")
         result = page.evaluate(
-            """([apiBase, bid]) => fetch(
+            """([apiBase, bid, auth]) => fetch(
                 `${apiBase}/v4/bookings-owner/${bid}/`,
-                { credentials: 'include' }
+                { credentials: 'include', headers: auth ? { Authorization: auth } : {} }
             ).then(r => r.ok ? r.json() : {})
             """,
-            [API_BASE, booking_id],
+            [API_BASE, booking_id, auth],
         )
         return result or {}
 
