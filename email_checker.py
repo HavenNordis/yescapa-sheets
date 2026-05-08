@@ -19,7 +19,7 @@ YESCAPA_SENDERS = [
     for s in os.getenv(
         "YESCAPA_SENDERS",
         "no-reply@yescapa.com,noreply@yescapa.com,reservations@yescapa.com,"
-        "no-reply@yescapa.pt,contact@yescapa.com",
+        "no-reply@yescapa.pt,contact@yescapa.com,notifications@yescapa.com",
     ).split(",")
 ]
 
@@ -29,7 +29,8 @@ BOOKING_KEYWORDS = [
     for s in os.getenv(
         "BOOKING_KEYWORDS",
         "nouvelle réservation,new booking,nueva reserva,nova reserva,"
-        "booking request,demande de réservation,pedido de reserva",
+        "booking request,demande de réservation,pedido de reserva,"
+        "recebeu uma reserva,reserva instantânea,instant booking",
     ).split(",")
 ]
 
