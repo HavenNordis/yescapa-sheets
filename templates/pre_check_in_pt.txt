@@ -1,0 +1,58 @@
+Olá ${nome},
+
+Seja bem-vindo à Haven Nordis. É com muito gosto que recebemos a confirmação da sua reserva na plataforma Yescapa.
+
+
+— Detalhes da reserva
+
+Referência: #${ref}
+Autocaravana: ${viatura}
+Pick-up: ${data_in} a partir das ${hora_in}
+Drop-off: ${data_out} até às ${hora_out}
+Nº de viajantes: ${num_viajantes}
+Países a visitar: ${paises}
+Pacote de quilómetros: ${kms}
+Seguro: ${seguro}
+
+
+— Pré-check-in: ajude-nos a preparar a autocaravana à sua medida
+
+Para o recebermos com o cuidado que merece, precisamos de algumas respostas suas. São elas que nos permitem afinar cada detalhe — desde a configuração das camas aos kits que deixamos preparados — antes da sua chegada.
+
+→ Preencher o pré-check-in: ${link_formulario}
+
+
+— Guia de funcionamento
+
+Preparámos um pequeno vídeo de boas-vindas que mostra a autocaravana por dentro, o que está incluído e como tudo funciona, para que a sua chegada ao check-in seja tranquila e a aventura comece sem percalços.
+
+▶ https://youtu.be/wD4Etsebtwo
+
+Recomendamos vê-lo com calma, idealmente com quem vai viajar consigo.
+
+
+— Detalhes práticos para a sua chegada
+
+Caução. O valor da caução é de 1.000€ e pode ser pago em dinheiro, MB Way ou por transferência bancária no momento do check-in. A caução é devolvida no momento do check-out, se não houver danos a declarar. Caso existam danos, a caução será retida até conhecermos o orçamento da reparação, que será agilizado com a maior brevidade possível.
+Dados para transferência:
+   IBAN: PT50 0033 0000 4582 1967 4500 5
+   BIC/SWIFT: BCOMPTPL
+   Titular: Haven Nordis, Lda
+
+Documentos. No dia do check-in, traga consigo a sua carta de condução e o seu documento de identificação ou passaporte. O contrato de aluguer e o certificado de seguro chegarão por email através da plataforma. Contará com uma cópia em papel na pasta dos documentos da autocaravana.
+
+Local de check-in. R. Jerónimo Dias 3-4, Costa de Caparica.
+Coordenadas: 38.648582, -9.232626
+Mapa: https://maps.app.goo.gl/NhQ6TagfemupLXmu5
+
+Combustível. A autocaravana é entregue com o depósito cheio e deve ser devolvida nas mesmas condições.
+
+Limpeza. Pedimos que as superfícies e armários estejam livres de itens pessoais, lixo e comida — a limpeza profunda fica por nossa conta. O depósito das águas cinzentas e a sanita química devem ser entregues esvaziados (caso contrário, são cobrados 15€ pelo despejo do depósito das águas cinzentas e 50€ pelo despejo da sanita química).
+
+Contacto durante a estadia. Estamos disponíveis para qualquer dúvida ou imprevisto através do contacto +351 964 043 209 (chamada e WhatsApp).
+
+Qualquer questão antes da chegada, basta responder a este email — temos todo o gosto em ajudar.
+
+Até breve,
+Equipa Haven Nordis
+ops@havennordis.com
