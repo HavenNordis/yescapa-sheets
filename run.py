@@ -1,9 +1,14 @@
 """
 Ponto de entrada para automação cloud.
+
 Chamado pelo Railway como cron job com um argumento:
 
-  python run.py --email      → verifica email e corre sync se houver reserva nova
-  python run.py --scheduled  → corre sync incondicionalmente (agendamento diário)
+    python run.py --email          → verifica email e corre sync se houver reserva nova,
+                                     depois tenta enviar emails de pré-check-in pendentes.
+    python run.py --scheduled      → corre sync incondicionalmente (agendamento diário),
+                                     depois tenta enviar emails de pré-check-in pendentes.
+    python run.py --pre-check-in   → corre APENAS o envio de emails pré-check-in
+                                     (sem tocar no sync; útil para testes manuais).
 """
 
 import sys
@@ -27,6 +32,22 @@ def run_sync(trigger: str):
         raise
 
 
+def run_pre_check_in():
+    """Envia emails de pré-check-in pendentes.
+
+    Falhas aqui não interrompem o cron — o sync já correu com sucesso e os
+    erros ficam registados na folha PreCheckIn para revisão manual.
+    """
+    log("A iniciar envio de emails pré-check-in...")
+    try:
+        from pre_check_in_sender import main as send_emails
+        result = send_emails()
+        log(f"Pré-check-in concluído: {result}")
+    except Exception as e:
+        log(f"Erro no pré-check-in: {e}")
+        # NÃO relançar — falha no envio não deve abortar o cron job.
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--scheduled"
 
@@ -38,14 +59,22 @@ def main():
             mark_booking_emails_read()
         else:
             log("Sem emails novos do Yescapa.")
+        # Em ambos os casos (com ou sem sync) tentamos enviar pré-check-in pendentes,
+        # para garantir que reservas que ficaram em backlog (por falha anterior) saem.
+        run_pre_check_in()
 
     elif mode == "--scheduled":
         log("Modo: agendamento")
         run_sync("scheduled")
+        run_pre_check_in()
+
+    elif mode == "--pre-check-in":
+        log("Modo: enviar pré-check-in apenas (sem sync)")
+        run_pre_check_in()
 
     else:
         log(f"Argumento desconhecido: {mode}")
-        log("Uso: python run.py --email | --scheduled")
+        log("Uso: python run.py --email | --scheduled | --pre-check-in")
         sys.exit(1)
 
 
