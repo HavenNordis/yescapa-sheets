@@ -31,6 +31,7 @@ import os
 import urllib.parse
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from string import Template
 
@@ -220,12 +221,14 @@ def detect_language(pais: str) -> str:
 
 # --- Templates ---
 
-def load_template(language: str) -> tuple[str, str]:
+def load_template(language: str) -> tuple[str, str, str]:
     subject_path = TEMPLATES_DIR / f"pre_check_in_{language}.subject"
     body_path = TEMPLATES_DIR / f"pre_check_in_{language}.txt"
+    html_path = TEMPLATES_DIR / f"pre_check_in_{language}.html"
     subject = subject_path.read_text(encoding="utf-8").strip()
     body = body_path.read_text(encoding="utf-8")
-    return subject, body
+    html = html_path.read_text(encoding="utf-8") if html_path.exists() else ""
+    return subject, body, html
 
 
 def build_form_link(booking: dict) -> str:
@@ -242,8 +245,8 @@ def build_form_link(booking: dict) -> str:
     return TALLY_FORM_URL + "?" + urllib.parse.urlencode(params)
 
 
-def render_email(language: str, booking: dict) -> tuple[str, str]:
-    subject_tpl, body_tpl = load_template(language)
+def render_email(language: str, booking: dict) -> tuple[str, str, str]:
+    subject_tpl, body_tpl, html_tpl = load_template(language)
     ctx = {
         "nome": booking.get("nome", ""),
         "ref": booking.get("ref", ""),
@@ -260,7 +263,8 @@ def render_email(language: str, booking: dict) -> tuple[str, str]:
     }
     subject = Template(subject_tpl).safe_substitute(ctx)
     body = Template(body_tpl).safe_substitute(ctx)
-    return subject, body
+    html = Template(html_tpl).safe_substitute(ctx) if html_tpl else ""
+    return subject, body, html
 
 
 # --- Gmail (OAuth user credentials para ops@havennordis.com) ---
@@ -282,8 +286,13 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
-def send_email(service, to: str, subject: str, body: str):
-    msg = MIMEText(body, "plain", "utf-8")
+def send_email(service, to: str, subject: str, body: str, html: str = ""):
+    if html:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+    else:
+        msg = MIMEText(body, "plain", "utf-8")
     msg["To"] = to
     msg["From"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
     msg["Reply-To"] = SENDER_EMAIL
@@ -362,7 +371,7 @@ def run():
             continue
 
         idioma = detect_language(booking["pais_hospede"])
-        subject, body = render_email(idioma, booking)
+        subject, body, html = render_email(idioma, booking)
 
         if DRY_RUN:
             log(f"  [DRY-RUN] #{bid} → {booking['email']} (lang={idioma}): {subject}")
@@ -382,7 +391,7 @@ def run():
             continue
 
         try:
-            send_email(gmail_service, booking["email"], subject, body)
+            send_email(gmail_service, booking["email"], subject, body, html)
             upsert_state(
                 state_ws, state_map, bid,
                 f"auto_enviado_{now_iso()}",
