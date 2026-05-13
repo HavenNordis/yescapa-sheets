@@ -15,4 +15,4 @@ ENV HEADLESS=true
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Comando padrão (substituído pelo cron job no Railway)
-CMD ["python", "run.py", "--scheduled"]
+CMD ["python", "run.py", "--pre-check-in"]
