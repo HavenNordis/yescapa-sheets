@@ -52,7 +52,10 @@ SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 RESERVAS_WORKSHEET = os.getenv("WORKSHEET_NAME", "Reservas")
 PRE_CHECK_IN_WORKSHEET = os.getenv("PRE_CHECK_IN_WORKSHEET", "PreCheckIn")
 
-TALLY_FORM_URL = os.getenv("TALLY_FORM_URL", "https://tally.so/r/zx2ORZ")
+TALLY_FORM_URL_PT = os.getenv("TALLY_FORM_URL_PT", "https://tally.so/r/zx2ORZ")
+TALLY_FORM_URL_EN = os.getenv("TALLY_FORM_URL_EN", "https://tally.so/r/BzAOr5")
+# Mantido por compatibilidade — usado se algum env antigo apontar para cá.
+TALLY_FORM_URL = os.getenv("TALLY_FORM_URL", TALLY_FORM_URL_PT)
 SENDER_EMAIL = os.getenv("SENDER_EMAIL", "ops@havennordis.com")
 SENDER_NAME = os.getenv("SENDER_NAME", "Haven Nordis")
 
@@ -235,7 +238,14 @@ def load_template(language: str = "") -> tuple[str, str, str]:
     return subject, body, html
 
 
-def build_form_link(booking: dict) -> str:
+def build_form_link(booking: dict, language: str = "pt") -> str:
+    """Constrói URL Tally pré-preenchido para o idioma indicado.
+
+    Devolve URL do formulário PT (default) ou EN, com hidden fields
+    populados a partir da booking. As perguntas hidden devem ter os
+    mesmos nomes nos dois formulários (ref, name, vehicle, date_in, date_out).
+    """
+    base_url = TALLY_FORM_URL_EN if language.lower() == "en" else TALLY_FORM_URL_PT
     params = {
         "name": booking.get("nome", ""),
         "ref": booking.get("ref", ""),
@@ -245,8 +255,8 @@ def build_form_link(booking: dict) -> str:
     }
     params = {k: v for k, v in params.items() if v}
     if not params:
-        return TALLY_FORM_URL
-    return TALLY_FORM_URL + "?" + urllib.parse.urlencode(params)
+        return base_url
+    return base_url + "?" + urllib.parse.urlencode(params)
 
 
 def render_email(language: str, booking: dict) -> tuple[str, str, str]:
@@ -263,7 +273,11 @@ def render_email(language: str, booking: dict) -> tuple[str, str, str]:
         "paises": booking.get("paises", ""),
         "kms": booking.get("kms", ""),
         "seguro": booking.get("seguro", ""),
-        "link_formulario": build_form_link(booking),
+        # Template bilingue tem 2 botões — um para cada idioma.
+        "link_formulario_pt": build_form_link(booking, "pt"),
+        "link_formulario_en": build_form_link(booking, "en"),
+        # Mantido por compatibilidade (caso o template antigo ainda use).
+        "link_formulario": build_form_link(booking, "pt"),
     }
     subject = Template(subject_tpl).safe_substitute(ctx)
     body = Template(body_tpl).safe_substitute(ctx)
