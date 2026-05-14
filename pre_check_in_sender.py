@@ -305,7 +305,42 @@ def send_email(service, to: str, subject: str, body: str, html: str = ""):
 
 # --- Main ---
 
+def send_test_email():
+    """Modo de teste: envia 1 email com dados fictícios para validar template HTML.
+
+    Ativa quando env var SEND_TEST_NOW=1. Não escreve em PreCheckIn.
+    Destinatário definido por TEST_RECIPIENT (default: joanamateusjorge@gmail.com).
+    Idioma por TEST_LANGUAGE (default: pt). Ignora todas as Reservas.
+    """
+    recipient = os.getenv("TEST_RECIPIENT", "joanamateusjorge@gmail.com")
+    language = os.getenv("TEST_LANGUAGE", "pt")
+    log(f"=== MODO TESTE: enviar 1 email para {recipient} (lang={language}) ===")
+
+    test_booking = {
+        "ref": "TEST-9999",
+        "nome": "Joana",
+        "viatura": "Bürstner Lyseo Privilège T 690 G (AA-00-AA)",
+        "data_in": "20/05/2026",
+        "hora_in": "15:00",
+        "data_out": "25/05/2026",
+        "hora_out": "11:00",
+        "num_viajantes": "2",
+        "paises": "Portugal, Espanha",
+        "kms": "1000 km (Incluídos)",
+        "seguro": "All Risks — Total",
+    }
+
+    gmail_service = get_gmail_service()
+    subject, body, html = render_email(language, test_booking)
+    send_email(gmail_service, recipient, subject, body, html)
+    log(f"=== TESTE enviado: '{subject}' a {recipient} ===")
+    return {"test_sent": True, "recipient": recipient, "language": language}
+
+
 def run():
+    if os.getenv("SEND_TEST_NOW", "").lower() in ("true", "1", "yes"):
+        return send_test_email()
+
     log(f"=== pre_check_in_sender (DRY_RUN={DRY_RUN}) ===")
 
     spreadsheet = open_spreadsheet()
