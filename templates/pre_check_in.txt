@@ -22,7 +22,7 @@ Seguro: ${seguro}
 
 Para o recebermos com o cuidado que merece, precisamos de algumas respostas suas. São elas que nos permitem afinar cada detalhe — desde a configuração das camas aos kits que deixamos preparados — antes da sua chegada.
 
-→ Preencher o pré-check-in: ${link_formulario}
+→ Preencher o pré-check-in: ${link_formulario_pt}
 
 
 — Guia de funcionamento
@@ -87,7 +87,7 @@ Insurance: ${seguro}
 
 So that we can welcome you with the care you deserve, we need a few details from you. Your answers are what allow us to fine-tune every detail — from the bed layout to the kits we set up — before you arrive.
 
-→ Complete pre-check-in: ${link_formulario}
+→ Complete pre-check-in: ${link_formulario_en}
 
 
 — Operating guide
