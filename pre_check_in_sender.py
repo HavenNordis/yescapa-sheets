@@ -68,9 +68,9 @@ PT_COUNTRIES = {
     "brasil", "brazil", "br",
 }
 
-# Estados meta que são "enviáveis" (reservas confirmadas/ativas).
-# Outros estados → marca "nao_enviar" para nunca tentar.
-SENDABLE_STATES = {"confirmed", "confirmada", "confirmado", ""}
+# Estados meta que são "enviáveis" — apenas reservas confirmadas pelo Yescapa.
+# Outros estados (cancelled, archived, todo, waiting, etc.) → marca "nao_enviar".
+SENDABLE_STATES = {"confirmed"}
 
 PRE_CHECK_IN_HEADERS = [
     "booking_id", "estado", "timestamp", "email_destinatario", "idioma", "erro",
@@ -221,10 +221,14 @@ def detect_language(pais: str) -> str:
 
 # --- Templates ---
 
-def load_template(language: str) -> tuple[str, str, str]:
-    subject_path = TEMPLATES_DIR / f"pre_check_in_{language}.subject"
-    body_path = TEMPLATES_DIR / f"pre_check_in_{language}.txt"
-    html_path = TEMPLATES_DIR / f"pre_check_in_{language}.html"
+def load_template(language: str = "") -> tuple[str, str, str]:
+    """Carrega o template bilingue (PT + EN no mesmo email).
+    O argumento `language` é mantido por compatibilidade mas ignorado:
+    o template é sempre o mesmo, com bloco PT em cima e bloco EN em baixo.
+    """
+    subject_path = TEMPLATES_DIR / "pre_check_in.subject"
+    body_path = TEMPLATES_DIR / "pre_check_in.txt"
+    html_path = TEMPLATES_DIR / "pre_check_in.html"
     subject = subject_path.read_text(encoding="utf-8").strip()
     body = body_path.read_text(encoding="utf-8")
     html = html_path.read_text(encoding="utf-8") if html_path.exists() else ""
