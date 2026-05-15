@@ -342,16 +342,30 @@ class YescapaPlaywright:
         try:
             page.goto(
                 f"{YESCAPA_BASE}/d/bookings/{booking_id}",
-                wait_until="domcontentloaded",
-                timeout=20_000,
+                wait_until="networkidle",
+                timeout=30_000,
             )
+            # Espera explícita por qualquer link de documento (pode demorar uns segundos
+            # a aparecer enquanto a SPA hidrata). Se nenhum aparecer em 8s, prossegue
+            # com captura vazia — significa que a Yescapa ainda não disponibilizou.
+            try:
+                page.wait_for_selector(
+                    'a[href*="/minhas-reservas/"][href*="/documentos"], '
+                    'a[href*="/minhas-reservas/factura-aluguer"]',
+                    timeout=8_000,
+                )
+            except Exception:
+                pass
+            # Buffer extra para garantir que todos os links renderizaram
             page.wait_for_timeout(1500)
+
             extracted = page.evaluate("""() => {
                 const result = { contrato: '', seguro: '', fatura: '' };
                 const links = document.querySelectorAll('a[href*="/minhas-reservas/"]');
                 for (const a of links) {
-                    const href = a.getAttribute('href') || '';
-                    if (href.includes('factura-aluguer') && href.endsWith('.pdf') || href.includes('factura-aluguer_')) {
+                    // a.href devolve URL absoluto resolvido pelo browser
+                    const href = a.href || a.getAttribute('href') || '';
+                    if (href.includes('factura-aluguer')) {
                         result.fatura = href;
                     } else if (href.includes('/documentos/atencao')) {
                         result.seguro = href;
@@ -364,6 +378,9 @@ class YescapaPlaywright:
             urls["contrato_url"] = extracted.get("contrato", "") or ""
             urls["seguro_url"]   = extracted.get("seguro", "") or ""
             urls["fatura_url"]   = extracted.get("fatura", "") or ""
+            # Log breve do resultado para diagnóstico
+            found = sum(1 for v in urls.values() if v)
+            print(f"  [{booking_id}] URLs docs: {found}/3 capturados")
         except Exception as e:
             print(f"  [{booking_id}] erro a captar URLs documentos: {e}")
         return urls
