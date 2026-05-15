@@ -48,6 +48,23 @@ def run_pre_check_in():
         # NÃO relançar — falha no envio não deve abortar o cron job.
 
 
+def run_docs_downloader():
+    """Descarrega PDFs Yescapa (Contrato/Seguro/Fatura) para Drive.
+
+    Idempotente: salta documentos já baixados. Falhas não interrompem o cron.
+    Salta totalmente se DRIVE_DOCS_FOLDER_ID não estiver definida (config
+    incompleta — ex: ainda não criámos a pasta Drive partilhada com a SA).
+    """
+    log("A iniciar download de documentos Yescapa...")
+    try:
+        from yescapa_docs_downloader import main as download_docs
+        result = download_docs()
+        log(f"Downloader concluído: {result}")
+    except Exception as e:
+        log(f"Erro no downloader: {e}")
+        # NÃO relançar.
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--scheduled"
 
@@ -62,15 +79,21 @@ def main():
         # Em ambos os casos (com ou sem sync) tentamos enviar pré-check-in pendentes,
         # para garantir que reservas que ficaram em backlog (por falha anterior) saem.
         run_pre_check_in()
+        run_docs_downloader()
 
     elif mode == "--scheduled":
         log("Modo: agendamento")
         run_sync("scheduled")
         run_pre_check_in()
+        run_docs_downloader()
 
     elif mode == "--pre-check-in":
         log("Modo: enviar pré-check-in apenas (sem sync)")
         run_pre_check_in()
+
+    elif mode == "--docs":
+        log("Modo: downloader de documentos apenas")
+        run_docs_downloader()
 
     else:
         log(f"Argumento desconhecido: {mode}")
