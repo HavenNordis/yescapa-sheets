@@ -103,7 +103,13 @@ class YescapaPlaywright:
             for i, summary in enumerate(summaries, 1):
                 bid = summary.get("id")
                 detail = self._fetch_detail(page, bid) if bid else {}
-                detailed.append({**summary, **detail})
+                docs = {}
+                # Só raspa URLs de documentos para reservas confirmed/em curso
+                # (poupar ~3s por reserva cancelled que não precisa de documentos)
+                meta = (summary.get("meta_state") or detail.get("meta_state") or "").lower()
+                if bid and meta in ("confirmed",):
+                    docs = self._fetch_documents_urls(page, bid)
+                detailed.append({**summary, **detail, **docs})
                 if i % 10 == 0 or i == len(summaries):
                     print(f"  {i}/{len(summaries)} processadas.")
 
@@ -324,6 +330,44 @@ class YescapaPlaywright:
         except Exception:
             return {}
 
+    def _fetch_documents_urls(self, page, booking_id: int) -> dict:
+        """Captura os URLs dos 3 documentos (Contrato, Seguro, Fatura) da página de detalhe.
+
+        Os URLs vivem como hrefs no HTML da página /d/bookings/{ref} mas não são
+        expostos na API. Cada documento tem token próprio.
+
+        Devolve dict com chaves: contrato_url, seguro_url, fatura_url (vazias se não existirem).
+        """
+        urls = {"contrato_url": "", "seguro_url": "", "fatura_url": ""}
+        try:
+            page.goto(
+                f"{YESCAPA_BASE}/d/bookings/{booking_id}",
+                wait_until="domcontentloaded",
+                timeout=20_000,
+            )
+            page.wait_for_timeout(1500)
+            extracted = page.evaluate("""() => {
+                const result = { contrato: '', seguro: '', fatura: '' };
+                const links = document.querySelectorAll('a[href*="/minhas-reservas/"]');
+                for (const a of links) {
+                    const href = a.getAttribute('href') || '';
+                    if (href.includes('factura-aluguer') && href.endsWith('.pdf') || href.includes('factura-aluguer_')) {
+                        result.fatura = href;
+                    } else if (href.includes('/documentos/atencao')) {
+                        result.seguro = href;
+                    } else if (href.includes('/documentos/')) {
+                        result.contrato = href;
+                    }
+                }
+                return result;
+            }""")
+            urls["contrato_url"] = extracted.get("contrato", "") or ""
+            urls["seguro_url"]   = extracted.get("seguro", "") or ""
+            urls["fatura_url"]   = extracted.get("fatura", "") or ""
+        except Exception as e:
+            print(f"  [{booking_id}] erro a captar URLs documentos: {e}")
+        return urls
+
 
 # ---------------------------------------------------------------------------
 # MAPEAMENTO DE CAMPOS
@@ -376,6 +420,13 @@ def parse_booking(raw: dict) -> dict:
         "Confirmado Em":         _fmt_date(raw.get("confirmed_on")),
         "Países Permitidos":     ", ".join(raw.get("countries") or []),
         "Motivo Cancelamento":   raw.get("cancel_reason"),
+        # URLs dos 3 documentos no portal Yescapa (raspados em _fetch_documents_urls).
+        # Vazios para reservas não-confirmed ou quando os PDFs ainda não foram
+        # gerados pela plataforma (depende do estado e do tempo desde a confirmação).
+        "Contrato URL":          raw.get("contrato_url") or "",
+        "Seguro URL":            raw.get("seguro_url") or "",
+        "Fatura URL":            raw.get("fatura_url") or raw.get("bill_url") or "",
+        # Colunas legadas (mantidas para compatibilidade com a sheet existente)
         "Contrato":              raw.get("contract_url"),
         "Fatura":                raw.get("bill_url"),
     }
