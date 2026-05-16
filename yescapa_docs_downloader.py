@@ -272,10 +272,26 @@ def process_bookings():
                 log(f"  #{ref} '{nome}' → {file_name}")
                 extra_headers = None
                 if bypass_login:
+                    # Headers que imitam fielmente o Chrome 148 a partir de yescapa.pt
                     extra_headers = {
                         "Authorization": YESCAPA_AUTH_TOKEN,
                         "X-Api-Key": YESCAPA_X_API_KEY,
+                        "Accept": "*/*",
+                        "Accept-Encoding": "gzip, deflate, br, zstd",
+                        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
+                        "Origin": YESCAPA_BASE,
                         "Referer": f"{YESCAPA_BASE}/d/bookings/{ref}",
+                        "Sec-Ch-Ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+                        "Sec-Ch-Ua-Mobile": "?0",
+                        "Sec-Ch-Ua-Platform": '"Windows"',
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "cross-site",
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/148.0.0.0 Safari/537.36"
+                        ),
                     }
                 pdf_bytes = download_pdf(page, url, extra_headers=extra_headers)
                 if not pdf_bytes:
@@ -286,7 +302,7 @@ def process_bookings():
 
         browser.close()
 
-    log(f"=== Fim: baixados={baixados} já_existiam={ja_existiam} falhados={falhados} ===")
+    log(f"=== Fim: baixados={baixados} ja_existiam={ja_existiam} falhados={falhados} ===")
     return {"baixados": baixados, "ja_existiam": ja_existiam, "falhados": falhados}
 
 

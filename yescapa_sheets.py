@@ -61,7 +61,7 @@ class YescapaPlaywright:
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
+                    "Chrome/148.0.0.0 Safari/537.36"
                 ),
             )
             page = context.new_page()
@@ -70,17 +70,28 @@ class YescapaPlaywright:
 
             if self._bypass_login:
                 print("Bypass login: a usar YESCAPA_AUTH_TOKEN + YESCAPA_X_API_KEY.")
+                # Headers que imitam fielmente o Chrome 148 a partir de yescapa.pt
+                # (replica o pedido real que vimos nos devtools — incluindo Sec-Fetch-*
+                #  e Client Hints, importantes para passar verificacoes anti-bot)
                 self._api_headers = {
                     "Authorization": YESCAPA_AUTH_TOKEN,
                     "X-Api-Key": YESCAPA_X_API_KEY,
-                    "Accept": "application/json, text/plain, */*",
+                    "Accept": "*/*",
+                    "Accept-Encoding": "gzip, deflate, br, zstd",
                     "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
                     "Origin": YESCAPA_BASE,
+                    "Priority": "u=1, i",
                     "Referer": f"{YESCAPA_BASE}/",
+                    "Sec-Ch-Ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "cross-site",
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
+                        "Chrome/148.0.0.0 Safari/537.36"
                     ),
                 }
             else:
