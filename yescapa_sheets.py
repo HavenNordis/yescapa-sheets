@@ -262,7 +262,8 @@ class YescapaPlaywright:
 
     def _login(self, page):
         print("A abrir página de login...")
-        page.goto(f"{YESCAPA_BASE}/conexao/", wait_until="domcontentloaded", timeout=30_000)
+        # Yescapa mudou o URL de login em 2026-05: era /conexao/, agora é /login/email
+        page.goto(f"{YESCAPA_BASE}/login/email?next=/", wait_until="domcontentloaded", timeout=30_000)
         page.wait_for_timeout(1500)
 
         # Aceitar cookies
@@ -294,8 +295,9 @@ class YescapaPlaywright:
             except Exception:
                 pass
 
-        # Submeter
+        # Submeter (Yescapa mudou label do botão para "Conectar-se" em 2026-05)
         for selector in [
+            "button:has-text('Conectar-se')",
             "button[type='submit']", "input[type='submit']",
             "button:has-text('Entrar')", "button:has-text('Se connecter')",
         ]:
@@ -305,7 +307,7 @@ class YescapaPlaywright:
             except Exception:
                 pass
 
-        # Aguardar redirect
+        # Aguardar redirect (URL deixa de incluir /login/ ou /conexao/)
         print("A aguardar autenticação...")
         try:
             page.wait_for_function(

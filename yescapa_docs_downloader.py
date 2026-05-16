@@ -159,7 +159,8 @@ def sanitize_folder_name(name: str) -> str:
 
 def yescapa_login(page):
     """Login na conta do parceiro Yescapa. Igual a yescapa_sheets._login()."""
-    page.goto(f"{YESCAPA_BASE}/conexao/", wait_until="domcontentloaded", timeout=30_000)
+    # Yescapa mudou URL de login em 2026-05: era /conexao/, agora é /login/email
+    page.goto(f"{YESCAPA_BASE}/login/email?next=/", wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_timeout(1500)
 
     for selector in [
@@ -188,6 +189,7 @@ def yescapa_login(page):
             pass
 
     for selector in [
+        "button:has-text('Conectar-se')",
         "button[type='submit']", "input[type='submit']",
         "button:has-text('Entrar')", "button:has-text('Se connecter')",
     ]:
