@@ -518,8 +518,38 @@ class SheetsClient:
             s = str(value or "").strip()
             return bool(s) and s.isdigit()
 
-        manual_rows = [r for r in existing_rows if not _is_yescapa_id(r.get("ID"))]
-        print(f"  {len(manual_rows)} reservas directas/manuais preservadas.")
+        # DEDUPLICACAO: se uma reserva manual ("M-3391737" / "MANUAL-3391737")
+        # corresponde a um booking que apareceu agora no Yescapa (ID "3391737"),
+        # removemos a linha manual — fica so a oficial. Evita duplicacao quando
+        # o scraping volta depois de a Joana ter inserido a reserva a mao.
+        _manual_prefix_re = re.compile(
+            r"^(?:M-|M_|MANUAL-|MANUAL_)(\d+)$", re.IGNORECASE,
+        )
+        yescapa_ids_now = {
+            str(b.get("ID") or "").strip()
+            for b in bookings
+            if str(b.get("ID") or "").strip().isdigit()
+        }
+
+        def _manual_collides_with_yescapa(value):
+            s = str(value or "").strip()
+            m = _manual_prefix_re.match(s)
+            return bool(m and m.group(1) in yescapa_ids_now)
+
+        manual_rows = []
+        dedup_count = 0
+        for r in existing_rows:
+            rid = r.get("ID")
+            if _is_yescapa_id(rid):
+                continue
+            if _manual_collides_with_yescapa(rid):
+                dedup_count += 1
+                continue
+            manual_rows.append(r)
+        print(
+            f"  {len(manual_rows)} reservas directas/manuais preservadas "
+            f"(dedup: {dedup_count} removidas por correspondencia com Yescapa)."
+        )
 
         # Merge URLs de runs anteriores nas novas bookings (so para IDs Yescapa)
         for b in bookings:
@@ -555,12 +585,11 @@ class SheetsClient:
 
     def update_log(self, sheet_name, log_sheet_name, trigger, n_bookings):
         spreadsheet = self.client.open(sheet_name)
-        headers = ["Data/Hora", "Motivo", "No Reservas"]
         try:
             ws = spreadsheet.worksheet(log_sheet_name)
         except gspread.WorksheetNotFound:
             ws = spreadsheet.add_worksheet(title=log_sheet_name, rows=1000, cols=3)
-            ws.append_row(headers)
+            ws.append_row(["Data/Hora", "Motivo", "Nº Reservas"])
             ws.format("A1:C1", {"textFormat": {"bold": True}})
 
         now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
