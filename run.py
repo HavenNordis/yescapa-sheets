@@ -22,14 +22,24 @@ def log(msg: str):
 
 
 def run_sync(trigger: str):
+    """Corre o sync Yescapa.
+
+    Falhas NÃO interrompem o cron — desde 2026-05-16 a Yescapa bloqueia o
+    Railway (anti-bot/IP de datacenter), pelo que o sync pode rebentar com
+    HTTP 403. Quando isso acontece, ainda assim queremos correr o
+    pre_check_in_sender (que processa reservas inseridas manualmente).
+    """
     log(f"A iniciar sync (trigger: {trigger})...")
     try:
         from yescapa_sheets import main
         main(trigger)
         log("Sync concluído com sucesso.")
+    except SystemExit as e:
+        log(f"Sync abortado (Yescapa bloqueado?): {e}")
+        # NÃO relançar — continua para pre_check_in + downloader
     except Exception as e:
         log(f"Erro no sync: {e}")
-        raise
+        # NÃO relançar — falha no sync não deve abortar o resto do cron
 
 
 def run_pre_check_in():
