@@ -1,31 +1,10 @@
 """
 yescapa_docs_downloader.py — Descarrega PDFs Yescapa (Contrato, Seguro, Fatura)
-para uma pasta Google Drive partilhada com a Service Account.
+para pasta Drive partilhada com a Service Account.
 
-Fluxo:
-  1. Lê folha "Reservas" (preenchida pelo yescapa_sheets.py)
-  2. Filtra confirmed com pelo menos 1 URL de documento preenchido
-  3. Para cada (reserva, documento), verifica se PDF já existe em Drive
-  4. Se não existe, baixa via Playwright (sessão autenticada) e sobe para Drive
-
-Estrutura no Drive:
-  Documentos Yescapa/        ← partilhada com SA, ID em DRIVE_DOCS_FOLDER_ID
-    └─ 2026/
-        └─ #3256591 - Bharpur Singh/
-            ├─ Contrato.pdf
-            ├─ Seguro.pdf
-            └─ Fatura.pdf
-
-Idempotência: o Drive é a fonte de verdade. Se o ficheiro já lá está, salta.
-Tracking explícito em sheet não é necessário (e seria reset pelo sync).
-
-Env vars necessárias:
-  GOOGLE_CREDENTIALS_JSON      (mesma da SA usada por yescapa_sheets)
-  YESCAPA_EMAIL, YESCAPA_PASSWORD
-  GOOGLE_SHEET_NAME            (default: "Reservas Yescapa")
-  WORKSHEET_NAME               (default: "Reservas")
-  DRIVE_DOCS_FOLDER_ID         (ID da pasta raiz partilhada com SA)
-  HEADLESS                     (default: "true")
+Autenticação Yescapa:
+  - Tradicional: YESCAPA_EMAIL + YESCAPA_PASSWORD (login Playwright)
+  - Bypass: YESCAPA_AUTH_TOKEN + YESCAPA_X_API_KEY (skip login, headers injectados)
 """
 import io
 import json
@@ -43,16 +22,17 @@ from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
-YESCAPA_EMAIL    = os.environ.get("YESCAPA_EMAIL", "")
-YESCAPA_PASSWORD = os.environ.get("YESCAPA_PASSWORD", "")
-GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
-WORKSHEET_NAME    = os.getenv("WORKSHEET_NAME", "Reservas")
+YESCAPA_EMAIL      = os.environ.get("YESCAPA_EMAIL", "")
+YESCAPA_PASSWORD   = os.environ.get("YESCAPA_PASSWORD", "")
+YESCAPA_AUTH_TOKEN = os.environ.get("YESCAPA_AUTH_TOKEN", "")
+YESCAPA_X_API_KEY  = os.environ.get("YESCAPA_X_API_KEY", "")
+GOOGLE_SHEET_NAME  = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
+WORKSHEET_NAME     = os.getenv("WORKSHEET_NAME", "Reservas")
 DRIVE_DOCS_FOLDER_ID = os.getenv("DRIVE_DOCS_FOLDER_ID", "")
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
 YESCAPA_BASE = "https://www.yescapa.pt"
 
-# (sheet_column_name, file_name_in_drive)
 DOCS = [
     ("Contrato URL", "Contrato.pdf"),
     ("Seguro URL",   "Seguro.pdf"),
@@ -60,15 +40,12 @@ DOCS = [
 ]
 
 
-def log(msg: str):
+def log(msg):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     print(f"[{ts}] [docs-downloader] {msg}", flush=True)
 
 
-# --- Google clients --------------------------------------------------------
-
 def get_google_clients():
-    """Devolve (sheets_client, drive_service) com scopes Sheets+Drive."""
     raw = os.environ.get("GOOGLE_CREDENTIALS_JSON") or ""
     if not raw:
         raise SystemExit("GOOGLE_CREDENTIALS_JSON não definida.")
@@ -78,24 +55,21 @@ def get_google_clients():
         "https://www.googleapis.com/auth/drive",
     ]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
-    sheets_client = gspread.authorize(creds)
-    drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    return sheets_client, drive_service
+    return (
+        gspread.authorize(creds),
+        build("drive", "v3", credentials=creds, cache_discovery=False),
+    )
 
 
-# --- Drive helpers ---------------------------------------------------------
-
-def _escape(name: str) -> str:
+def _escape(name):
     return name.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def find_or_create_folder(drive_service, name: str, parent_id: str) -> str:
-    """Encontra ou cria pasta `name` dentro de `parent_id`. Devolve folder_id."""
+def find_or_create_folder(drive_service, name, parent_id):
     query = (
         f"name = '{_escape(name)}' "
         f"and mimeType = 'application/vnd.google-apps.folder' "
-        f"and '{parent_id}' in parents "
-        f"and trashed = false"
+        f"and '{parent_id}' in parents and trashed = false"
     )
     result = drive_service.files().list(
         q=query, spaces="drive", fields="files(id, name)",
@@ -104,7 +78,6 @@ def find_or_create_folder(drive_service, name: str, parent_id: str) -> str:
     files = result.get("files", [])
     if files:
         return files[0]["id"]
-
     metadata = {
         "name": name,
         "mimeType": "application/vnd.google-apps.folder",
@@ -113,16 +86,14 @@ def find_or_create_folder(drive_service, name: str, parent_id: str) -> str:
     folder = drive_service.files().create(
         body=metadata, fields="id", supportsAllDrives=True,
     ).execute()
-    log(f"  pasta criada: '{name}' (id={folder['id']})")
+    log(f"  pasta criada: '{name}'")
     return folder["id"]
 
 
-def find_file(drive_service, name: str, folder_id: str) -> Optional[str]:
-    """Devolve file_id se já existir, None caso contrário."""
+def find_file(drive_service, name, folder_id):
     query = (
         f"name = '{_escape(name)}' "
-        f"and '{folder_id}' in parents "
-        f"and trashed = false"
+        f"and '{folder_id}' in parents and trashed = false"
     )
     result = drive_service.files().list(
         q=query, spaces="drive", fields="files(id, name)",
@@ -132,8 +103,7 @@ def find_file(drive_service, name: str, folder_id: str) -> Optional[str]:
     return files[0]["id"] if files else None
 
 
-def upload_pdf(drive_service, pdf_bytes: bytes, name: str, folder_id: str) -> str:
-    """Upload PDF bytes para Drive folder. Devolve file_id."""
+def upload_pdf(drive_service, pdf_bytes, name, folder_id):
     metadata = {"name": name, "parents": [folder_id]}
     media = MediaIoBaseUpload(
         io.BytesIO(pdf_bytes), mimetype="application/pdf", resumable=False,
@@ -144,61 +114,48 @@ def upload_pdf(drive_service, pdf_bytes: bytes, name: str, folder_id: str) -> st
     return file["id"]
 
 
-# --- Naming ---------------------------------------------------------------
-
 _SANITIZE_RE = re.compile(r"[^\w\s\-#.,]+", re.UNICODE)
 
 
-def sanitize_folder_name(name: str) -> str:
-    """Remove caracteres problemáticos mantendo unicode (acentos)."""
+def sanitize_folder_name(name):
     cleaned = _SANITIZE_RE.sub("", name).strip()
-    return cleaned[:120]  # Drive limita comprimento; corta a 120 chars
+    return cleaned[:120]
 
-
-# --- Playwright Yescapa ---------------------------------------------------
 
 def yescapa_login(page):
-    """Login na conta do parceiro Yescapa. Igual a yescapa_sheets._login()."""
-    # Yescapa mudou URL de login em 2026-05: era /conexao/, agora é /login/email
-    page.goto(f"{YESCAPA_BASE}/login/email?next=/", wait_until="domcontentloaded", timeout=30_000)
+    page.goto(
+        f"{YESCAPA_BASE}/login/email?next=/",
+        wait_until="domcontentloaded", timeout=30_000,
+    )
     page.wait_for_timeout(1500)
-
-    for selector in [
+    for sel in [
         "#axeptio_btn_acceptAll", "#onetrust-accept-btn-handler",
         "button:has-text('Aceitar tudo')", "button:has-text('Aceitar')",
         "button:has-text('Accept all')",
     ]:
         try:
-            page.click(selector, timeout=3000)
-            break
+            page.click(sel, timeout=3000); break
         except Exception:
             pass
-
-    for selector in ["input[type='email']", "input[name='email']", "#id_email", "#email"]:
+    for sel in ["input[type='email']", "input[name='email']", "#id_email", "#email"]:
         try:
-            page.fill(selector, YESCAPA_EMAIL, timeout=5000)
-            break
+            page.fill(sel, YESCAPA_EMAIL, timeout=5000); break
         except Exception:
             pass
-
-    for selector in ["input[type='password']", "input[name='password']", "#id_password", "#password"]:
+    for sel in ["input[type='password']", "input[name='password']", "#id_password", "#password"]:
         try:
-            page.fill(selector, YESCAPA_PASSWORD, timeout=5000)
-            break
+            page.fill(sel, YESCAPA_PASSWORD, timeout=5000); break
         except Exception:
             pass
-
-    for selector in [
+    for sel in [
         "button:has-text('Conectar-se')",
         "button[type='submit']", "input[type='submit']",
         "button:has-text('Entrar')", "button:has-text('Se connecter')",
     ]:
         try:
-            page.click(selector, timeout=5000)
-            break
+            page.click(sel, timeout=5000); break
         except Exception:
             pass
-
     try:
         page.wait_for_function(
             "() => !window.location.pathname.includes('conexao') && "
@@ -210,34 +167,34 @@ def yescapa_login(page):
     page.wait_for_timeout(2000)
 
 
-def download_pdf(page, url: str) -> Optional[bytes]:
-    """Faz GET autenticado e devolve bytes do PDF (ou None se falhou)."""
+def download_pdf(page, url, extra_headers=None):
     try:
-        resp = page.request.get(url, timeout=20_000)
+        kwargs = {"timeout": 20_000}
+        if extra_headers:
+            kwargs["headers"] = extra_headers
+        resp = page.request.get(url, **kwargs)
         if not resp.ok:
             log(f"    HTTP {resp.status}")
             return None
         body = resp.body()
         if body[:4] != b"%PDF":
-            # Se não é PDF, pode ter sido HTML (a Yescapa pode mostrar página intermédia)
-            log(f"    resposta não é PDF (primeiros 4 bytes: {body[:4]!r})")
+            log(f"    não é PDF (primeiros 4 bytes: {body[:4]!r})")
             return None
         return body
     except Exception as e:
-        log(f"    erro a baixar: {e}")
+        log(f"    erro: {e}")
         return None
 
 
-# --- Main flow ------------------------------------------------------------
-
 def process_bookings():
     if not DRIVE_DOCS_FOLDER_ID:
-        log("DRIVE_DOCS_FOLDER_ID não definida — a saltar download de documentos.")
-        return {"baixados": 0, "ja_existiam": 0, "falhados": 0, "skipped_no_url": 0}
+        log("DRIVE_DOCS_FOLDER_ID não definida — a saltar.")
+        return {"baixados": 0, "ja_existiam": 0, "falhados": 0}
 
-    if not YESCAPA_EMAIL or not YESCAPA_PASSWORD:
-        log("YESCAPA_EMAIL/PASSWORD não definidas — a saltar.")
-        return {"baixados": 0, "ja_existiam": 0, "falhados": 0, "skipped_no_url": 0}
+    bypass_login = bool(YESCAPA_AUTH_TOKEN and YESCAPA_X_API_KEY)
+    if not bypass_login and (not YESCAPA_EMAIL or not YESCAPA_PASSWORD):
+        log("Sem credenciais nem tokens — a saltar.")
+        return {"baixados": 0, "ja_existiam": 0, "falhados": 0}
 
     sheets_client, drive_service = get_google_clients()
 
@@ -251,16 +208,19 @@ def process_bookings():
     for row in rows:
         if (row.get("Estado Meta") or "").strip().lower() != "confirmed":
             continue
+        # Saltar reservas directas (ID não-numérico) — não têm PDFs no Yescapa
+        rid = str(row.get("ID") or "").strip()
+        if not rid or not rid.isdigit():
+            continue
         has_url = any((row.get(col) or "").strip() for col, _ in DOCS)
         if not has_url:
             continue
         candidates.append(row)
-    log(f"  → {len(candidates)} reservas confirmed com pelo menos 1 URL")
+    log(f"  → {len(candidates)} confirmed Yescapa com ≥1 URL")
 
     if not candidates:
-        return {"baixados": 0, "ja_existiam": 0, "falhados": 0, "skipped_no_url": 0}
+        return {"baixados": 0, "ja_existiam": 0, "falhados": 0}
 
-    # Drive: pasta raiz já existe (configurada via env var); criamos só ano e booking
     year = str(datetime.now(timezone.utc).year)
     year_folder_id = find_or_create_folder(drive_service, year, DRIVE_DOCS_FOLDER_ID)
 
@@ -281,8 +241,11 @@ def process_bookings():
         )
         page = context.new_page()
 
-        log("A fazer login no Yescapa...")
-        yescapa_login(page)
+        if bypass_login:
+            log("Bypass login: YESCAPA_AUTH_TOKEN + YESCAPA_X_API_KEY.")
+        else:
+            log("A fazer login no Yescapa...")
+            yescapa_login(page)
 
         for row in candidates:
             ref  = str(row.get("ID") or "").strip()
@@ -307,7 +270,14 @@ def process_bookings():
                     continue
 
                 log(f"  #{ref} '{nome}' → {file_name}")
-                pdf_bytes = download_pdf(page, url)
+                extra_headers = None
+                if bypass_login:
+                    extra_headers = {
+                        "Authorization": YESCAPA_AUTH_TOKEN,
+                        "X-Api-Key": YESCAPA_X_API_KEY,
+                        "Referer": f"{YESCAPA_BASE}/d/bookings/{ref}",
+                    }
+                pdf_bytes = download_pdf(page, url, extra_headers=extra_headers)
                 if not pdf_bytes:
                     falhados += 1
                     continue
@@ -317,11 +287,7 @@ def process_bookings():
         browser.close()
 
     log(f"=== Fim: baixados={baixados} já_existiam={ja_existiam} falhados={falhados} ===")
-    return {
-        "baixados": baixados,
-        "ja_existiam": ja_existiam,
-        "falhados": falhados,
-    }
+    return {"baixados": baixados, "ja_existiam": ja_existiam, "falhados": falhados}
 
 
 def main():
