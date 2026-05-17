@@ -1,11 +1,17 @@
 """
-Yescapa → Google Sheets — versão com bypass via tokens da API.
+Yescapa → Google Sheets
+Faz login via Playwright e usa page.evaluate(fetch()) para chamar a API
+diretamente dentro do browser — sem replicar autenticação externamente.
 
-Modos de autenticação:
-  1) Login Playwright tradicional (YESCAPA_EMAIL/PASSWORD)
-  2) Bypass: usa YESCAPA_AUTH_TOKEN + YESCAPA_X_API_KEY (extraídos do browser).
-     Salta o login, chama a API directamente. Não scrapa URLs de documentos
-     (esses precisam de sessão HTML — preservados de runs anteriores).
+Pré-requisitos:
+  pip install playwright gspread google-auth python-dotenv
+  playwright install chromium
+
+Google Cloud:
+  1. Criar projeto em console.cloud.google.com
+  2. Ativar "Google Sheets API" e "Google Drive API"
+  3. Criar Service Account → conteúdo JSON em GOOGLE_CREDENTIALS_JSON
+  4. Partilhar o Google Sheet com o email da Service Account
 """
 
 import json
@@ -20,23 +26,31 @@ from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
-YESCAPA_EMAIL     = os.environ.get("YESCAPA_EMAIL", "")
-YESCAPA_PASSWORD  = os.environ.get("YESCAPA_PASSWORD", "")
+# ---------------------------------------------------------------------------
+# CONFIGURAÇÃO
+# ---------------------------------------------------------------------------
+
+YESCAPA_EMAIL     = os.environ["YESCAPA_EMAIL"]
+YESCAPA_PASSWORD  = os.environ["YESCAPA_PASSWORD"]
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 WORKSHEET_NAME    = os.getenv("WORKSHEET_NAME", "Reservas")
 LOGSHEET_NAME     = os.getenv("LOGSHEET_NAME", "Log")
-
-YESCAPA_AUTH_TOKEN = os.environ.get("YESCAPA_AUTH_TOKEN", "")
-YESCAPA_X_API_KEY  = os.environ.get("YESCAPA_X_API_KEY", "")
 
 YESCAPA_BASE = "https://www.yescapa.pt"
 API_BASE     = "https://api.jelouemoncampingcar.com"
 HEADLESS     = os.getenv("HEADLESS", "false").lower() == "true"
 
 
+# ---------------------------------------------------------------------------
+# YESCAPA — tudo dentro do Playwright
+# ---------------------------------------------------------------------------
+
 class YescapaPlaywright:
 
-    FETCH_STATES = [
+    # Combinações (meta_state, state) a recolher.
+    # state=None → sem filtro de sub-estado (devolve tudo do meta_state).
+    # archived é dividido pelos sub-estados conhecidos para garantir paginação correcta.
+    FETCH_STATES: list[tuple[str, str | None]] = [
         ("confirmed",   None),
         ("waiting",     None),
         ("todo",        None),
@@ -46,12 +60,11 @@ class YescapaPlaywright:
         ("archived",    "CANCELLED_BOTH"),
     ]
 
-    def run(self):
-        self._intercepted = {}
-        self._api_counts = {}
-        self._api_next = {}
-        self._api_headers = {}
-        self._bypass_login = bool(YESCAPA_AUTH_TOKEN and YESCAPA_X_API_KEY)
+    def run(self) -> list[dict]:
+        self._intercepted: dict[int, dict] = {}
+        self._api_counts: dict[str, int] = {}  # chave: "meta_state" ou "meta_state/state"
+        self._api_next: dict[str, str] = {}    # chave → URL base da página 1 para construir paginação
+        self._api_headers: dict = {}            # headers capturados do primeiro pedido da SPA à API
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -61,47 +74,19 @@ class YescapaPlaywright:
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/148.0.0.0 Safari/537.36"
+                    "Chrome/124.0.0.0 Safari/537.36"
                 ),
             )
             page = context.new_page()
             page.on("response", self._on_api_response)
             page.on("request", self._on_api_request)
 
-            if self._bypass_login:
-                print("Bypass login: a usar YESCAPA_AUTH_TOKEN + YESCAPA_X_API_KEY.")
-                # Headers que imitam fielmente o Chrome 148 a partir de yescapa.pt
-                # (replica o pedido real que vimos nos devtools — incluindo Sec-Fetch-*
-                #  e Client Hints, importantes para passar verificacoes anti-bot)
-                self._api_headers = {
-                    "Authorization": YESCAPA_AUTH_TOKEN,
-                    "X-Api-Key": YESCAPA_X_API_KEY,
-                    "Accept": "*/*",
-                    "Accept-Encoding": "gzip, deflate, br, zstd",
-                    "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
-                    "Origin": YESCAPA_BASE,
-                    "Priority": "u=1, i",
-                    "Referer": f"{YESCAPA_BASE}/",
-                    "Sec-Ch-Ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
-                    "Sec-Ch-Ua-Mobile": "?0",
-                    "Sec-Ch-Ua-Platform": '"Windows"',
-                    "Sec-Fetch-Dest": "empty",
-                    "Sec-Fetch-Mode": "cors",
-                    "Sec-Fetch-Site": "cross-site",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/148.0.0.0 Safari/537.36"
-                    ),
-                }
-            else:
-                self._login(page)
+            # 1. Login
+            self._login(page)
 
+            # 2. Percorrer todas as combinações com paginação
             for meta_state, state in self.FETCH_STATES:
-                if self._bypass_login:
-                    self._collect_state_api(page, meta_state, state)
-                else:
-                    self._collect_state(page, meta_state, state)
+                self._collect_state(page, meta_state, state)
 
             summaries = list(self._intercepted.values())
             print(f"\nTotal recolhido: {len(summaries)} reservas.")
@@ -110,18 +95,15 @@ class YescapaPlaywright:
 
             if not summaries:
                 browser.close()
-                raise SystemExit("Nenhuma reserva encontrada. Verifica autenticacao.")
+                raise SystemExit("Nenhuma reserva encontrada. Verifica se o login funcionou.")
 
+            # 3. Buscar detalhes de cada reserva
             print(f"A recolher detalhes de {len(summaries)} reservas...")
             detailed = []
             for i, summary in enumerate(summaries, 1):
                 bid = summary.get("id")
                 detail = self._fetch_detail(page, bid) if bid else {}
-                docs = {}
-                meta = (summary.get("meta_state") or detail.get("meta_state") or "").lower()
-                if bid and meta in ("confirmed",) and not self._bypass_login:
-                    docs = self._fetch_documents_urls(page, bid)
-                detailed.append({**summary, **detail, **docs})
+                detailed.append({**summary, **detail})
                 if i % 10 == 0 or i == len(summaries):
                     print(f"  {i}/{len(summaries)} processadas.")
 
@@ -129,64 +111,14 @@ class YescapaPlaywright:
 
         return detailed
 
-    def _collect_state_api(self, page, meta_state, state=None):
+    def _collect_state(self, page, meta_state: str, state: str | None = None) -> None:
+        """Carrega a página do meta_state (+ sub-estado opcional) e pagina via clique."""
         key = f"{meta_state}/{state}" if state else meta_state
-        params = f"meta_state={meta_state}" + (f"&state={state}" if state else "")
-        print(f"\nA recolher (API) {params}...")
+        label = f"meta_state={meta_state}" + (f"&state={state}" if state else "")
+        print(f"\nA recolher {label}...")
 
-        page_num = 1
-        total = 0
-        api_total = None
-
-        while page_num <= 50:
-            url = f"{API_BASE}/v4/bookings-owner/?{params}&page={page_num}&page_size=20"
-            try:
-                resp = page.request.get(url, headers=self._api_headers, timeout=20_000)
-            except Exception as e:
-                print(f"  [{key}] erro de rede p{page_num}: {e}")
-                break
-            if not resp.ok:
-                print(f"  [{key}] HTTP {resp.status} em p{page_num}")
-                if resp.status in (401, 403):
-                    raise SystemExit(
-                        f"Token Yescapa rejeitado (HTTP {resp.status}). "
-                        "Recapture YESCAPA_AUTH_TOKEN do browser."
-                    )
-                break
-            try:
-                data = resp.json()
-            except Exception:
-                print(f"  [{key}] resposta nao-JSON em p{page_num}")
-                break
-
-            if api_total is None:
-                api_total = data.get("count") if isinstance(data, dict) else None
-                self._api_counts[key] = api_total or 0
-                print(f"    API [{key}]: count={api_total}")
-
-            results = data if isinstance(data, list) else data.get("results", [])
-            new_count = 0
-            for b in results:
-                bid = b.get("id")
-                if bid and bid not in self._intercepted:
-                    self._intercepted[bid] = b
-                    new_count += 1
-            total += new_count
-            print(f"  [{key}] p{page_num}: +{new_count} | total={total}/{api_total or '?'}")
-
-            if not results or new_count == 0:
-                break
-            if isinstance(data, dict) and not data.get("next"):
-                break
-            if api_total and total >= api_total:
-                break
-            page_num += 1
-
-    def _collect_state(self, page, meta_state, state=None):
-        key = f"{meta_state}/{state}" if state else meta_state
         params = f"meta_state={meta_state}" + (f"&state={state}" if state else "")
         url = f"{YESCAPA_BASE}/d/bookings?{params}"
-        print(f"\nA recolher {params}...")
         try:
             page.goto(url, wait_until="networkidle", timeout=30_000)
             try:
@@ -209,9 +141,12 @@ class YescapaPlaywright:
         )
         print(f"  [{key}] p1: {captured}/{api_total or '?'} capturadas")
 
+        # Paginar via clique enquanto a API reportar mais reservas do que capturámos
         page_num = 2
         while api_total > 0 and captured < api_total and page_num <= 50:
             before = len(self._intercepted)
+
+            # Procura o botão "próxima página" por texto, aria-label ou classe
             clicked = page.evaluate("""() => {
                 const isNext = el => {
                     const t = (el.textContent || '').trim();
@@ -219,9 +154,9 @@ class YescapaPlaywright:
                     const c = (el.className || '').toLowerCase();
                     return !el.disabled && el.offsetParent !== null && (
                         a.includes('next') || a.includes('suivant') ||
-                        a.includes('proxim') || a.includes('prochaine') ||
+                        a.includes('próxim') || a.includes('prochaine') ||
                         c.includes('next') || c.includes('forward') ||
-                        t === 'NEXT_ARROW'
+                        t === '›' || t === '>' || t === '»' || t === '→'
                     );
                 };
                 const btn = [...document.querySelectorAll('button,a')].find(isNext);
@@ -235,6 +170,7 @@ class YescapaPlaywright:
                     next_url = re.sub(r"([?&]page=)\d+", f"\\g<1>{page_num}", base)
                 else:
                     next_url = f"{API_BASE}/v4/bookings-owner/?{params}&page={page_num}"
+                print(f"  [{key}] botão não encontrado (p{page_num}), fetch directo: {next_url}")
                 resp = page.request.get(next_url, headers=self._api_headers)
                 if not resp.ok:
                     break
@@ -245,6 +181,12 @@ class YescapaPlaywright:
                     if bid and bid not in self._intercepted:
                         self._intercepted[bid] = b
                 new = len(self._intercepted) - before
+                captured = sum(
+                    1 for b in self._intercepted.values()
+                    if b.get("meta_state") == meta_state
+                    and (state is None or b.get("state") == state)
+                )
+                print(f"  [{key}] fetch directo p{page_num}: +{new} | {captured}/{api_total} capturadas")
                 if new == 0:
                     break
                 page_num += 1
@@ -265,24 +207,31 @@ class YescapaPlaywright:
                 if b.get("meta_state") == meta_state
                 and (state is None or b.get("state") == state)
             )
+            print(f"  [{key}] p{page_num}: +{new} | {captured}/{api_total} capturadas")
+
             if new == 0:
                 break
             page_num += 1
 
-    def _on_api_request(self, request):
+    def _on_api_request(self, request) -> None:
+        """Captura os headers da SPA para reutilizar em fetches directos."""
         if self._api_headers:
             return
         if "jelouemoncampingcar.com/v4/bookings-owner" not in request.url:
             return
+        # Ignora pseudo-headers e headers geridos pelo browser/rede
         skip = {"content-length", "connection", "host", ":method", ":path", ":scheme", ":authority"}
         self._api_headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
 
-    def _on_api_response(self, response):
+    def _on_api_response(self, response) -> None:
+        """Intercepta respostas da API de listagem feitas pela SPA."""
         url = response.url
         if "jelouemoncampingcar.com" not in url:
             return
+        # Captura qualquer endpoint de reservas (bookings-owner, bookings, etc.)
         if not re.search(r"/v4/booking", url):
             return
+        # Exclui endpoints de detalhe individual (ex: /bookings-owner/123/)
         if re.search(r"/v\d+/booking[^?]*/\d+/", url):
             return
         try:
@@ -293,8 +242,10 @@ class YescapaPlaywright:
                 if ms_m:
                     key = ms_m.group(1) + (f"/{st_m.group(1)}" if st_m else "")
                     self._api_counts[key] = data["count"]
+                    # Guardar o URL real da p1 (com page= e page_size=) para derivar páginas seguintes
                     if key not in self._api_next and re.search(r"[?&]page=\d+", url):
                         self._api_next[key] = url
+                    print(f"    API [{key}]: count={data['count']}")
             results = data if isinstance(data, list) else data.get("results", [])
             for b in results:
                 bid = b.get("id")
@@ -304,10 +255,11 @@ class YescapaPlaywright:
             pass
 
     def _login(self, page):
-        print("A abrir pagina de login...")
-        page.goto(f"{YESCAPA_BASE}/login/email?next=/", wait_until="domcontentloaded", timeout=30_000)
+        print("A abrir página de login...")
+        page.goto(f"{YESCAPA_BASE}/conexao/", wait_until="domcontentloaded", timeout=30_000)
         page.wait_for_timeout(1500)
 
+        # Aceitar cookies
         for selector in [
             "#axeptio_btn_acceptAll", "#onetrust-accept-btn-handler",
             "button:has-text('Aceitar tudo')", "button:has-text('Aceitar')",
@@ -315,10 +267,12 @@ class YescapaPlaywright:
         ]:
             try:
                 page.click(selector, timeout=3000)
+                print("  Cookies aceites.")
                 break
             except Exception:
                 pass
 
+        # Email
         for selector in ["input[type='email']", "input[name='email']", "#id_email", "#email"]:
             try:
                 page.fill(selector, YESCAPA_EMAIL, timeout=5000)
@@ -326,6 +280,7 @@ class YescapaPlaywright:
             except Exception:
                 pass
 
+        # Password
         for selector in ["input[type='password']", "input[name='password']", "#id_password", "#password"]:
             try:
                 page.fill(selector, YESCAPA_PASSWORD, timeout=5000)
@@ -333,8 +288,8 @@ class YescapaPlaywright:
             except Exception:
                 pass
 
+        # Submeter
         for selector in [
-            "button:has-text('Conectar-se')",
             "button[type='submit']", "input[type='submit']",
             "button:has-text('Entrar')", "button:has-text('Se connecter')",
         ]:
@@ -344,19 +299,22 @@ class YescapaPlaywright:
             except Exception:
                 pass
 
+        # Aguardar redirect
+        print("A aguardar autenticação...")
         try:
             page.wait_for_function(
                 "() => !window.location.pathname.includes('conexao') && "
                 "!window.location.pathname.includes('login')",
                 timeout=20_000,
             )
-            print(f"  Login OK. URL: {page.url}")
+            print(f"  Login bem-sucedido. URL: {page.url}")
         except Exception:
-            print(f"  Aviso: URL apos login: {page.url}")
+            print(f"  Aviso: URL após login: {page.url}")
 
         page.wait_for_timeout(2000)
 
-    def _fetch_detail(self, page, booking_id):
+    def _fetch_detail(self, page, booking_id: int) -> dict:
+        """Busca detalhes completos de uma reserva."""
         try:
             resp = page.request.get(
                 f"{API_BASE}/v4/bookings-owner/{booking_id}/",
@@ -366,56 +324,19 @@ class YescapaPlaywright:
         except Exception:
             return {}
 
-    def _fetch_documents_urls(self, page, booking_id):
-        urls = {"contrato_url": "", "seguro_url": "", "fatura_url": ""}
-        try:
-            page.goto(
-                f"{YESCAPA_BASE}/d/bookings/{booking_id}",
-                wait_until="networkidle",
-                timeout=30_000,
-            )
-            try:
-                page.wait_for_selector(
-                    'a[href*="/minhas-reservas/"][href*="/documentos"], '
-                    'a[href*="/minhas-reservas/factura-aluguer"]',
-                    timeout=8_000,
-                )
-            except Exception:
-                pass
-            page.wait_for_timeout(1500)
 
-            extracted = page.evaluate("""() => {
-                const result = { contrato: '', seguro: '', fatura: '' };
-                const links = document.querySelectorAll('a[href*="/minhas-reservas/"]');
-                for (const a of links) {
-                    const href = a.href || a.getAttribute('href') || '';
-                    if (href.includes('factura-aluguer')) {
-                        result.fatura = href;
-                    } else if (href.includes('/documentos/atencao')) {
-                        result.seguro = href;
-                    } else if (href.includes('/documentos/')) {
-                        result.contrato = href;
-                    }
-                }
-                return result;
-            }""")
-            urls["contrato_url"] = extracted.get("contrato", "") or ""
-            urls["seguro_url"]   = extracted.get("seguro", "") or ""
-            urls["fatura_url"]   = extracted.get("fatura", "") or ""
-            found = sum(1 for v in urls.values() if v)
-            print(f"  [{booking_id}] URLs docs: {found}/3 capturados")
-        except Exception as e:
-            print(f"  [{booking_id}] erro: {e}")
-        return urls
+# ---------------------------------------------------------------------------
+# MAPEAMENTO DE CAMPOS
+# ---------------------------------------------------------------------------
 
-
-def parse_booking(raw):
+def parse_booking(raw: dict) -> dict:
     guest     = raw.get("guest") or {}
     camper    = raw.get("camper") or {}
     location  = camper.get("location") or {}
     insurance = raw.get("insurance") or {}
     pickup    = raw.get("pickup") or {}
     dropoff   = raw.get("dropoff") or {}
+
     hour_from = raw.get("hour_from")
     hour_to   = raw.get("hour_to")
 
@@ -423,45 +344,46 @@ def parse_booking(raw):
         "ID":                    raw.get("id"),
         "Estado":                raw.get("state"),
         "Estado Meta":           raw.get("meta_state"),
-        "Data Inicio":           _fmt_date(raw.get("date_from")),
-        "Hora Inicio":           pickup.get("time") or (f"{hour_from}:00" if hour_from is not None else ""),
+        "Data Início":           _fmt_date(raw.get("date_from")),
+        "Hora Início":           pickup.get("time") or (f"{hour_from}:00" if hour_from is not None else ""),
         "Data Fim":              _fmt_date(raw.get("date_to")),
         "Hora Fim":              dropoff.get("time") or (f"{hour_to}:00" if hour_to is not None else ""),
-        "No Dias":               raw.get("nb_days"),
-        "Hospede Nome":          guest.get("first_name"),
-        "Hospede Apelido":       guest.get("last_name"),
-        "Hospede Email":         guest.get("email"),
-        "Hospede Telefone":      guest.get("phone"),
-        "Hospede Verificado":    guest.get("profile_certified"),
-        "Hospede Reservas":      guest.get("bookings_as_guest"),
+        "Nº Dias":               raw.get("nb_days"),
+        "Hóspede Nome":          guest.get("first_name"),
+        "Hóspede Apelido":       guest.get("last_name"),
+        "Hóspede Email":         guest.get("email"),
+        "Hóspede Telefone":      guest.get("phone"),
+        "Hóspede Verificado":    guest.get("profile_certified"),
+        "Hóspede Reservas":      guest.get("bookings_as_guest"),
         "Viajantes":             raw.get("travelers"),
-        "2o Condutor":           raw.get("second_driver"),
-        "Veiculo":               camper.get("title"),
-        "Matricula":             camper.get("registration"),
+        "2º Condutor":           raw.get("second_driver"),
+        "Veículo":               camper.get("title"),
+        "Matrícula":             camper.get("registration"),
         "Cidade":                location.get("city"),
         "Morada":                location.get("street"),
-        "Pais":                  location.get("country"),
-        "KM Incluidos":          raw.get("total_km"),
-        "Opcao KM":              raw.get("km_option"),
+        "País":                  location.get("country"),
+        "KM Incluídos":          raw.get("total_km"),
+        "Opção KM":              raw.get("km_option"),
         "Seguro":                insurance.get("name"),
         "Cobertura Seguro":      raw.get("insurance_coverage"),
-        "Preco Hospede":         raw.get("price_guest"),
-        "Ganhos Proprietario":   raw.get("total_earnings"),
+        "Preço Hóspede":         raw.get("price_guest"),
+        "Ganhos Proprietário":   raw.get("total_earnings"),
         "Moeda":                 raw.get("total_earnings_currency") or "EUR",
-        "Caucao":                raw.get("deposit"),
-        "Meio Caucao":           ", ".join(raw.get("deposit_means") or []),
-        "Reserva Instantanea":   raw.get("is_instant"),
+        "Caução":                raw.get("deposit"),
+        "Meio Caução":           ", ".join(raw.get("deposit_means") or []),
+        "Reserva Instantânea":   raw.get("is_instant"),
         "Profissional":          raw.get("is_professional"),
         "Confirmado Em":         _fmt_date(raw.get("confirmed_on")),
-        "Paises Permitidos":     ", ".join(raw.get("countries") or []),
+        "Países Permitidos":     ", ".join(raw.get("countries") or []),
         "Motivo Cancelamento":   raw.get("cancel_reason"),
-        "Contrato URL":          raw.get("contrato_url") or "",
-        "Seguro URL":            raw.get("seguro_url") or "",
-        "Fatura URL":            raw.get("fatura_url") or raw.get("bill_url") or "",
         "Contrato":              raw.get("contract_url"),
         "Fatura":                raw.get("bill_url"),
     }
 
+
+# ---------------------------------------------------------------------------
+# GOOGLE SHEETS
+# ---------------------------------------------------------------------------
 
 class SheetsClient:
     SCOPES = [
@@ -472,125 +394,48 @@ class SheetsClient:
     def __init__(self):
         raw = os.environ.get("GOOGLE_CREDENTIALS_JSON") or ""
         if not raw:
-            raise SystemExit("Variavel GOOGLE_CREDENTIALS_JSON nao definida.")
+            raise SystemExit("Variável GOOGLE_CREDENTIALS_JSON não definida.")
         creds = Credentials.from_service_account_info(json.loads(raw), scopes=self.SCOPES)
         self.client = gspread.authorize(creds)
 
-    def get_or_create_worksheet(self, sheet_name, worksheet_name):
+    def get_or_create_worksheet(self, sheet_name: str, worksheet_name: str):
         try:
             spreadsheet = self.client.open(sheet_name)
         except gspread.SpreadsheetNotFound:
             spreadsheet = self.client.create(sheet_name)
+            print(f"Spreadsheet '{sheet_name}' criada.")
 
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=2000, cols=25)
+            print(f"Separador '{worksheet_name}' criado.")
 
         return worksheet
 
-    def update_bookings(self, worksheet, bookings):
-        """MERGE: preserva reservas directas (ID nao-numerico) e URLs existentes.
-
-        - Linhas com ID numerico = Yescapa -> sobrescritas pelo novo sync
-        - Linhas com ID vazio ou alfanumerico = reservas directas/manuais -> PRESERVADAS
-        - URLs de documentos vazias no novo run sao preenchidas a partir do anterior
-        """
+    def update_bookings(self, worksheet, bookings: list[dict]):
         if not bookings:
-            print("Nenhuma reserva da API para guardar.")
+            print("Nenhuma reserva para guardar.")
             return
 
-        preserve_cols = ("Contrato URL", "Seguro URL", "Fatura URL")
-        existing_rows = []
-        try:
-            existing_rows = worksheet.get_all_records()
-        except Exception as e:
-            print(f"  Aviso: nao foi possivel ler sheet existente ({e}).")
-
-        existing_by_id = {}
-        for row in existing_rows:
-            rid = str(row.get("ID") or "").strip()
-            if rid:
-                existing_by_id[rid] = row
-
-        # Reservas directas/manuais (ID nao-numerico ou vazio) -> preservar tal qual
-        def _is_yescapa_id(value):
-            s = str(value or "").strip()
-            return bool(s) and s.isdigit()
-
-        # DEDUPLICACAO: se uma reserva manual ("M-3391737" / "MANUAL-3391737")
-        # corresponde a um booking que apareceu agora no Yescapa (ID "3391737"),
-        # removemos a linha manual — fica so a oficial. Evita duplicacao quando
-        # o scraping volta depois de a Joana ter inserido a reserva a mao.
-        _manual_prefix_re = re.compile(
-            r"^(?:M-|M_|MANUAL-|MANUAL_)(\d+)$", re.IGNORECASE,
-        )
-        yescapa_ids_now = {
-            str(b.get("ID") or "").strip()
-            for b in bookings
-            if str(b.get("ID") or "").strip().isdigit()
-        }
-
-        def _manual_collides_with_yescapa(value):
-            s = str(value or "").strip()
-            m = _manual_prefix_re.match(s)
-            return bool(m and m.group(1) in yescapa_ids_now)
-
-        manual_rows = []
-        dedup_count = 0
-        for r in existing_rows:
-            rid = r.get("ID")
-            if _is_yescapa_id(rid):
-                continue
-            if _manual_collides_with_yescapa(rid):
-                dedup_count += 1
-                continue
-            manual_rows.append(r)
-        print(
-            f"  {len(manual_rows)} reservas directas/manuais preservadas "
-            f"(dedup: {dedup_count} removidas por correspondencia com Yescapa)."
-        )
-
-        # Merge URLs de runs anteriores nas novas bookings (so para IDs Yescapa)
-        for b in bookings:
-            rid = str(b.get("ID") or "").strip()
-            prev = existing_by_id.get(rid)
-            if not prev:
-                continue
-            for col in preserve_cols:
-                if not (b.get(col) or "").strip() and (prev.get(col) or "").strip():
-                    b[col] = prev[col]
-
-        # Cabecalho: campos do parse_booking + qualquer coluna extra das manuais
         headers = list(bookings[0].keys())
-        manual_extra = set()
-        for row in manual_rows:
-            for k in row.keys():
-                if k not in headers:
-                    manual_extra.add(k)
-        headers.extend(sorted(manual_extra))
-
-        # Linhas finais: manuais primeiro, depois Yescapa
-        rows = [headers]
-        for row in manual_rows:
-            rows.append([str(row.get(h, "") or "") for h in headers])
-        for b in bookings:
-            rows.append([str(b.get(h, "") or "") for h in headers])
+        rows = [headers] + [[str(b.get(h, "") or "") for h in headers] for b in bookings]
 
         worksheet.clear()
         worksheet.update(rows, "A1")
         worksheet.format(f"A1:{_col_letter(len(headers))}1", {"textFormat": {"bold": True}})
-        print(f"{len(manual_rows) + len(bookings)} linhas escritas "
-              f"({len(manual_rows)} manuais + {len(bookings)} Yescapa).")
+        print(f"{len(bookings)} reservas guardadas no Google Sheets.")
 
-    def update_log(self, sheet_name, log_sheet_name, trigger, n_bookings):
+    def update_log(self, sheet_name: str, log_sheet_name: str, trigger: str, n_bookings: int):
         spreadsheet = self.client.open(sheet_name)
+        headers = ["Data/Hora", "Motivo", "Nº Reservas"]
         try:
             ws = spreadsheet.worksheet(log_sheet_name)
         except gspread.WorksheetNotFound:
             ws = spreadsheet.add_worksheet(title=log_sheet_name, rows=1000, cols=3)
-            ws.append_row(["Data/Hora", "Motivo", "Nº Reservas"])
+            ws.append_row(headers)
             ws.format("A1:C1", {"textFormat": {"bold": True}})
+            print(f"Separador '{log_sheet_name}' criado.")
 
         now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
         motivo = "Email (nova reserva)" if trigger == "email" else "Agendamento"
@@ -599,10 +444,14 @@ class SheetsClient:
             ws.update(f"A{cell.row}:C{cell.row}", [[now, motivo, n_bookings]])
         else:
             ws.append_row([now, motivo, n_bookings])
-        print(f"Log: {now} | {motivo} | {n_bookings}")
+        print(f"Log actualizado: {now} | {motivo} | {n_bookings} reservas")
 
 
-def _fmt_date(value):
+# ---------------------------------------------------------------------------
+# UTILITÁRIOS
+# ---------------------------------------------------------------------------
+
+def _fmt_date(value) -> str:
     if not value:
         return ""
     if isinstance(value, str):
@@ -615,7 +464,7 @@ def _fmt_date(value):
     return str(value)
 
 
-def _col_letter(n):
+def _col_letter(n: int) -> str:
     result = ""
     while n:
         n, r = divmod(n - 1, 26)
@@ -623,17 +472,26 @@ def _col_letter(n):
     return result
 
 
-def main(trigger="scheduled"):
-    print("=== Yescapa -> Google Sheets ===")
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+
+def main(trigger: str = "scheduled"):
+    print("=== Yescapa → Google Sheets ===")
+
+    # 1. Login + recolha de dados (tudo dentro do browser)
     detailed = YescapaPlaywright().run()
     print(f"Total: {len(detailed)} reservas.")
 
+    # 2. Guardar no Google Sheets
+    print("\n=== Google Sheets ===")
     sheets = SheetsClient()
     ws = sheets.get_or_create_worksheet(GOOGLE_SHEET_NAME, WORKSHEET_NAME)
     bookings = [parse_booking(b) for b in detailed]
     sheets.update_bookings(ws, bookings)
     sheets.update_log(GOOGLE_SHEET_NAME, LOGSHEET_NAME, trigger, len(bookings))
-    print("Concluido!")
+
+    print("\nConcluído!")
 
 
 if __name__ == "__main__":

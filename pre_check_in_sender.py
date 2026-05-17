@@ -31,6 +31,7 @@ import os
 import urllib.parse
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from string import Template
 
@@ -74,41 +75,6 @@ SENDABLE_STATES = {"confirmed", "confirmada", "confirmado", ""}
 PRE_CHECK_IN_HEADERS = [
     "booking_id", "estado", "timestamp", "email_destinatario", "idioma", "erro",
 ]
-
-
-# --- Normalização de booking_id ---
-#
-# Reservas inseridas manualmente (quando o scraping Yescapa falha) usam o
-# formato "M-3391737" ou "MANUAL-3391737". Quando o scraping voltar, o
-# Yescapa devolve a mesma reserva com ID puro "3391737". Sem normalização,
-# o sender consideraria duas reservas distintas e enviaria email 2x.
-#
-# Esta função extrai o ID Yescapa "limpo" de qualquer formato manual conhecido.
-# IDs sem prefixo manual (incluindo manuais 100% sem correspondência Yescapa,
-# ex: "NUNO-20260520") ficam intactos.
-import re as _re_norm
-
-_MANUAL_PREFIX_RE = _re_norm.compile(
-    r"^(?:M-|M_|MANUAL-|MANUAL_)(\d+)$",
-    _re_norm.IGNORECASE,
-)
-
-
-def normalize_booking_id(value) -> str:
-    """Devolve a chave canónica para de-duplicação por reserva.
-
-    Exemplos:
-      "3391737"          -> "3391737"
-      "M-3391737"        -> "3391737"
-      "MANUAL-3391737"   -> "3391737"
-      "NUNO-20260520"    -> "NUNO-20260520"  (sem prefixo conhecido)
-      ""                 -> ""
-    """
-    s = str(value or "").strip()
-    if not s:
-        return s
-    m = _MANUAL_PREFIX_RE.match(s)
-    return m.group(1) if m else s
 
 
 # --- Logging ---
@@ -159,54 +125,42 @@ def ensure_pre_check_in_worksheet(spreadsheet):
 
 
 def load_state(ws) -> dict:
-    """Devolve {booking_id_normalizado: {'estado':..., 'row_index':int, ...}}.
-
-    A chave é normalize_booking_id(...) para que M-3391737 e 3391737 colapsem
-    no mesmo registo (evita duplo envio quando a reserva manual é substituída
-    pela versão oficial do scraping).
-    """
+    """Devolve {booking_id (str): {'estado':..., 'row_index':int, ...}}."""
     rows = ws.get_all_records()
     state = {}
     for idx, row in enumerate(rows):
-        raw_bid = str(row.get("booking_id", "")).strip()
-        if not raw_bid:
+        bid = str(row.get("booking_id", "")).strip()
+        if not bid:
             continue
-        key = normalize_booking_id(raw_bid)
-        state[key] = {
+        state[bid] = {
             "estado": str(row.get("estado", "")).strip(),
             "timestamp": str(row.get("timestamp", "")),
             "email": str(row.get("email_destinatario", "")),
             "idioma": str(row.get("idioma", "")),
             "erro": str(row.get("erro", "")),
             "_row_index": idx + 2,  # +1 header, +1 1-indexed
-            "_raw_id": raw_bid,
         }
     return state
 
 
 def upsert_state(ws, state_map: dict, booking_id: str, estado: str,
                  email: str = "", idioma: str = "", erro: str = ""):
-    """Escreve estado na PreCheckIn (insert ou update) e atualiza state_map.
-
-    Indexa state_map por normalize_booking_id, mas escreve na sheet o
-    booking_id original (para preservar a origem visível).
-    """
+    """Escreve estado na worksheet PreCheckIn (insert ou update) e atualiza state_map."""
     booking_id = str(booking_id)
-    key = normalize_booking_id(booking_id)
     ts = now_iso()
     row_values = [booking_id, estado, ts, email, idioma, erro]
 
-    if key in state_map:
-        idx = state_map[key]["_row_index"]
+    if booking_id in state_map:
+        idx = state_map[booking_id]["_row_index"]
         ws.update(f"A{idx}:F{idx}", [row_values])
     else:
         ws.append_row(row_values, value_input_option="USER_ENTERED")
         # Atualiza index local para futuras escritas
-        state_map[key] = {"_row_index": len(state_map) + 2}
+        state_map[booking_id] = {"_row_index": len(state_map) + 2}
 
-    state_map[key].update({
+    state_map[booking_id].update({
         "estado": estado, "timestamp": ts, "email": email,
-        "idioma": idioma, "erro": erro, "_raw_id": booking_id,
+        "idioma": idioma, "erro": erro,
     })
 
 
@@ -267,12 +221,14 @@ def detect_language(pais: str) -> str:
 
 # --- Templates ---
 
-def load_template(language: str) -> tuple[str, str]:
+def load_template(language: str) -> tuple[str, str, str]:
     subject_path = TEMPLATES_DIR / f"pre_check_in_{language}.subject"
     body_path = TEMPLATES_DIR / f"pre_check_in_{language}.txt"
+    html_path = TEMPLATES_DIR / f"pre_check_in_{language}.html"
     subject = subject_path.read_text(encoding="utf-8").strip()
     body = body_path.read_text(encoding="utf-8")
-    return subject, body
+    html = html_path.read_text(encoding="utf-8") if html_path.exists() else ""
+    return subject, body, html
 
 
 def build_form_link(booking: dict) -> str:
@@ -289,8 +245,8 @@ def build_form_link(booking: dict) -> str:
     return TALLY_FORM_URL + "?" + urllib.parse.urlencode(params)
 
 
-def render_email(language: str, booking: dict) -> tuple[str, str]:
-    subject_tpl, body_tpl = load_template(language)
+def render_email(language: str, booking: dict) -> tuple[str, str, str]:
+    subject_tpl, body_tpl, html_tpl = load_template(language)
     ctx = {
         "nome": booking.get("nome", ""),
         "ref": booking.get("ref", ""),
@@ -307,7 +263,8 @@ def render_email(language: str, booking: dict) -> tuple[str, str]:
     }
     subject = Template(subject_tpl).safe_substitute(ctx)
     body = Template(body_tpl).safe_substitute(ctx)
-    return subject, body
+    html = Template(html_tpl).safe_substitute(ctx) if html_tpl else ""
+    return subject, body, html
 
 
 # --- Gmail (OAuth user credentials para ops@havennordis.com) ---
@@ -329,8 +286,13 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
-def send_email(service, to: str, subject: str, body: str):
-    msg = MIMEText(body, "plain", "utf-8")
+def send_email(service, to: str, subject: str, body: str, html: str = ""):
+    if html:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+    else:
+        msg = MIMEText(body, "plain", "utf-8")
     msg["To"] = to
     msg["From"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
     msg["Reply-To"] = SENDER_EMAIL
@@ -376,7 +338,7 @@ def run():
             ignorados += 1
             continue
 
-        existing = state_map.get(normalize_booking_id(bid))
+        existing = state_map.get(str(bid))
         estado_atual = (existing or {}).get("estado", "").strip()
 
         # SAFEGUARD 1: só age em estado vazio
@@ -409,7 +371,7 @@ def run():
             continue
 
         idioma = detect_language(booking["pais_hospede"])
-        subject, body = render_email(idioma, booking)
+        subject, body, html = render_email(idioma, booking)
 
         if DRY_RUN:
             log(f"  [DRY-RUN] #{bid} → {booking['email']} (lang={idioma}): {subject}")
@@ -429,7 +391,7 @@ def run():
             continue
 
         try:
-            send_email(gmail_service, booking["email"], subject, body)
+            send_email(gmail_service, booking["email"], subject, body, html)
             upsert_state(
                 state_ws, state_map, bid,
                 f"auto_enviado_{now_iso()}",
