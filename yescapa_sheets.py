@@ -112,12 +112,16 @@ class YescapaPlaywright:
         return detailed
 
     def _collect_state(self, page, meta_state: str, state: str | None = None) -> None:
-        """Carrega a página do meta_state (+ sub-estado opcional) e pagina via clique."""
-        key = f"{meta_state}/{state}" if state else meta_state
-        label = f"meta_state={meta_state}" + (f"&state={state}" if state else "")
-        print(f"\nA recolher {label}...")
+        """Carrega p1 via SPA (para apanhar count + headers) e pagina via API directa.
 
+        Não depende de clicar em botões "next" da SPA — usa o número total de
+        reservas reportado pela API e itera explicitamente page=2..N até captar tudo.
+        """
+        key = f"{meta_state}/{state}" if state else meta_state
         params = f"meta_state={meta_state}" + (f"&state={state}" if state else "")
+        print(f"\nA recolher {key}...")
+
+        # 1. p1 via SPA — apanha count, headers da API e os primeiros bookings
         url = f"{YESCAPA_BASE}/d/bookings?{params}"
         try:
             page.goto(url, wait_until="networkidle", timeout=30_000)
@@ -130,7 +134,7 @@ class YescapaPlaywright:
                 pass
             page.wait_for_timeout(2000)
         except Exception as e:
-            print(f"  [{key}] erro ao carregar: {e}")
+            print(f"  [{key}] erro ao carregar p1: {e}")
             return
 
         api_total = self._api_counts.get(key, 0)
@@ -139,67 +143,59 @@ class YescapaPlaywright:
             if b.get("meta_state") == meta_state
             and (state is None or b.get("state") == state)
         )
-        print(f"  [{key}] p1: {captured}/{api_total or '?'} capturadas")
+        print(f"  [{key}] p1 via SPA: {captured}/{api_total or '?'} capturadas")
 
-        # Paginar via clique enquanto a API reportar mais reservas do que capturámos
-        page_num = 2
-        while api_total > 0 and captured < api_total and page_num <= 50:
+        if api_total == 0 or captured >= api_total:
+            return
+
+        # 2. Determinar page_size — preferir o da URL real da SPA; caso contrário 10
+        base_url = self._api_next.get(key, "")
+        ps_match = re.search(r"[?&]page_size=(\d+)", base_url)
+        page_size = int(ps_match.group(1)) if ps_match else 10
+        total_pages = (api_total + page_size - 1) // page_size
+        print(f"  [{key}] api_total={api_total} page_size={page_size} → {total_pages} páginas no total")
+
+        # 3. Paginar via API directa para p2..N
+        for page_num in range(2, total_pages + 1):
             before = len(self._intercepted)
 
-            # Procura o botão "próxima página" por texto, aria-label ou classe
-            clicked = page.evaluate("""() => {
-                const isNext = el => {
-                    const t = (el.textContent || '').trim();
-                    const a = (el.getAttribute('aria-label') || '').toLowerCase();
-                    const c = (el.className || '').toLowerCase();
-                    return !el.disabled && el.offsetParent !== null && (
-                        a.includes('next') || a.includes('suivant') ||
-                        a.includes('próxim') || a.includes('prochaine') ||
-                        c.includes('next') || c.includes('forward') ||
-                        t === '›' || t === '>' || t === '»' || t === '→'
-                    );
-                };
-                const btn = [...document.querySelectorAll('button,a')].find(isNext);
-                if (btn) { btn.click(); return true; }
-                return false;
-            }""")
-
-            if not clicked:
-                base = self._api_next.get(key, "")
-                if base:
-                    next_url = re.sub(r"([?&]page=)\d+", f"\\g<1>{page_num}", base)
-                else:
-                    next_url = f"{API_BASE}/v4/bookings-owner/?{params}&page={page_num}"
-                print(f"  [{key}] botão não encontrado (p{page_num}), fetch directo: {next_url}")
-                resp = page.request.get(next_url, headers=self._api_headers)
-                if not resp.ok:
-                    break
-                api_data = resp.json()
-                results = api_data if isinstance(api_data, list) else api_data.get("results", [])
-                for b in results:
-                    bid = b.get("id")
-                    if bid and bid not in self._intercepted:
-                        self._intercepted[bid] = b
-                new = len(self._intercepted) - before
-                captured = sum(
-                    1 for b in self._intercepted.values()
-                    if b.get("meta_state") == meta_state
-                    and (state is None or b.get("state") == state)
+            if base_url and re.search(r"[?&]page=\d+", base_url):
+                next_url = re.sub(r"([?&]page=)\d+", f"\\g<1>{page_num}", base_url)
+            elif base_url:
+                sep = "&" if "?" in base_url else "?"
+                next_url = f"{base_url}{sep}page={page_num}"
+            else:
+                next_url = (
+                    f"{API_BASE}/v4/bookings-owner/?{params}"
+                    f"&page={page_num}&page_size={page_size}"
                 )
-                print(f"  [{key}] fetch directo p{page_num}: +{new} | {captured}/{api_total} capturadas")
-                if new == 0:
-                    break
-                page_num += 1
-                continue
 
             try:
-                page.wait_for_response(
-                    lambda r: "jelouemoncampingcar.com/v4/bookings-owner" in r.url,
-                    timeout=10_000,
-                )
-            except Exception:
-                pass
-            page.wait_for_timeout(2000)
+                resp = page.request.get(next_url, headers=self._api_headers)
+            except Exception as e:
+                print(f"  [{key}] p{page_num} ERRO de rede: {e}")
+                break
+
+            if not resp.ok:
+                body = ""
+                try:
+                    body = resp.text()[:200]
+                except Exception:
+                    pass
+                print(f"  [{key}] p{page_num} HTTP {resp.status}: {body}")
+                break
+
+            try:
+                api_data = resp.json()
+            except Exception as e:
+                print(f"  [{key}] p{page_num} JSON inválido: {e}")
+                break
+
+            results = api_data if isinstance(api_data, list) else api_data.get("results", [])
+            for b in results:
+                bid = b.get("id")
+                if bid and bid not in self._intercepted:
+                    self._intercepted[bid] = b
 
             new = len(self._intercepted) - before
             captured = sum(
@@ -207,11 +203,14 @@ class YescapaPlaywright:
                 if b.get("meta_state") == meta_state
                 and (state is None or b.get("state") == state)
             )
-            print(f"  [{key}] p{page_num}: +{new} | {captured}/{api_total} capturadas")
+            print(f"  [{key}] p{page_num}: API devolveu {len(results)}, +{new} novos | {captured}/{api_total}")
 
-            if new == 0:
+            if captured >= api_total:
                 break
-            page_num += 1
+            if len(results) == 0:
+                # API ficou sem mais resultados antes de chegarmos ao count → parar.
+                print(f"  [{key}] p{page_num} vazia — interrompo paginação (esperava mais {api_total - captured})")
+                break
 
     def _on_api_request(self, request) -> None:
         """Captura os headers da SPA para reutilizar em fetches directos."""
