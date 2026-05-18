@@ -52,7 +52,10 @@ SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 RESERVAS_WORKSHEET = os.getenv("WORKSHEET_NAME", "Reservas")
 PRE_CHECK_IN_WORKSHEET = os.getenv("PRE_CHECK_IN_WORKSHEET", "PreCheckIn")
 
-TALLY_FORM_URL = os.getenv("TALLY_FORM_URL", "https://tally.so/r/zx2ORZ")
+TALLY_FORM_URL_PT = os.getenv("TALLY_FORM_URL_PT", "https://tally.so/r/zx2ORZ")
+TALLY_FORM_URL_EN = os.getenv("TALLY_FORM_URL_EN", "https://tally.so/r/BzAOr5")
+# Mantido por compatibilidade — usado se algum env antigo apontar para cá.
+TALLY_FORM_URL = os.getenv("TALLY_FORM_URL", TALLY_FORM_URL_PT)
 SENDER_EMAIL = os.getenv("SENDER_EMAIL", "ops@havennordis.com")
 SENDER_NAME = os.getenv("SENDER_NAME", "Haven Nordis")
 
@@ -68,9 +71,9 @@ PT_COUNTRIES = {
     "brasil", "brazil", "br",
 }
 
-# Estados meta que são "enviáveis" (reservas confirmadas/ativas).
-# Outros estados → marca "nao_enviar" para nunca tentar.
-SENDABLE_STATES = {"confirmed", "confirmada", "confirmado", ""}
+# Estados meta que são "enviáveis" — apenas reservas confirmadas pelo Yescapa.
+# Outros estados (cancelled, archived, todo, waiting, etc.) → marca "nao_enviar".
+SENDABLE_STATES = {"confirmed"}
 
 PRE_CHECK_IN_HEADERS = [
     "booking_id", "estado", "timestamp", "email_destinatario", "idioma", "erro",
@@ -221,17 +224,28 @@ def detect_language(pais: str) -> str:
 
 # --- Templates ---
 
-def load_template(language: str) -> tuple[str, str, str]:
-    subject_path = TEMPLATES_DIR / f"pre_check_in_{language}.subject"
-    body_path = TEMPLATES_DIR / f"pre_check_in_{language}.txt"
-    html_path = TEMPLATES_DIR / f"pre_check_in_{language}.html"
+def load_template(language: str = "") -> tuple[str, str, str]:
+    """Carrega o template bilingue (PT + EN no mesmo email).
+    O argumento `language` é mantido por compatibilidade mas ignorado:
+    o template é sempre o mesmo, com bloco PT em cima e bloco EN em baixo.
+    """
+    subject_path = TEMPLATES_DIR / "pre_check_in.subject"
+    body_path = TEMPLATES_DIR / "pre_check_in.txt"
+    html_path = TEMPLATES_DIR / "pre_check_in.html"
     subject = subject_path.read_text(encoding="utf-8").strip()
     body = body_path.read_text(encoding="utf-8")
     html = html_path.read_text(encoding="utf-8") if html_path.exists() else ""
     return subject, body, html
 
 
-def build_form_link(booking: dict) -> str:
+def build_form_link(booking: dict, language: str = "pt") -> str:
+    """Constrói URL Tally pré-preenchido para o idioma indicado.
+
+    Devolve URL do formulário PT (default) ou EN, com hidden fields
+    populados a partir da booking. As perguntas hidden devem ter os
+    mesmos nomes nos dois formulários (ref, name, vehicle, date_in, date_out).
+    """
+    base_url = TALLY_FORM_URL_EN if language.lower() == "en" else TALLY_FORM_URL_PT
     params = {
         "name": booking.get("nome", ""),
         "ref": booking.get("ref", ""),
@@ -241,8 +255,8 @@ def build_form_link(booking: dict) -> str:
     }
     params = {k: v for k, v in params.items() if v}
     if not params:
-        return TALLY_FORM_URL
-    return TALLY_FORM_URL + "?" + urllib.parse.urlencode(params)
+        return base_url
+    return base_url + "?" + urllib.parse.urlencode(params)
 
 
 def render_email(language: str, booking: dict) -> tuple[str, str, str]:
@@ -259,7 +273,11 @@ def render_email(language: str, booking: dict) -> tuple[str, str, str]:
         "paises": booking.get("paises", ""),
         "kms": booking.get("kms", ""),
         "seguro": booking.get("seguro", ""),
-        "link_formulario": build_form_link(booking),
+        # Template bilingue tem 2 botões — um para cada idioma.
+        "link_formulario_pt": build_form_link(booking, "pt"),
+        "link_formulario_en": build_form_link(booking, "en"),
+        # Mantido por compatibilidade (caso o template antigo ainda use).
+        "link_formulario": build_form_link(booking, "pt"),
     }
     subject = Template(subject_tpl).safe_substitute(ctx)
     body = Template(body_tpl).safe_substitute(ctx)
@@ -305,7 +323,42 @@ def send_email(service, to: str, subject: str, body: str, html: str = ""):
 
 # --- Main ---
 
+def send_test_email():
+    """Modo de teste: envia 1 email com dados fictícios para validar template HTML.
+
+    Ativa quando env var SEND_TEST_NOW=1. Não escreve em PreCheckIn.
+    Destinatário definido por TEST_RECIPIENT (default: joanamateusjorge@gmail.com).
+    Idioma por TEST_LANGUAGE (default: pt). Ignora todas as Reservas.
+    """
+    recipient = os.getenv("TEST_RECIPIENT", "joanamateusjorge@gmail.com")
+    language = os.getenv("TEST_LANGUAGE", "pt")
+    log(f"=== MODO TESTE: enviar 1 email para {recipient} (lang={language}) ===")
+
+    test_booking = {
+        "ref": "TEST-9999",
+        "nome": "Joana",
+        "viatura": "Bürstner Lyseo Privilège T 690 G (AA-00-AA)",
+        "data_in": "20/05/2026",
+        "hora_in": "15:00",
+        "data_out": "25/05/2026",
+        "hora_out": "11:00",
+        "num_viajantes": "2",
+        "paises": "Portugal, Espanha",
+        "kms": "1000 km (Incluídos)",
+        "seguro": "All Risks — Total",
+    }
+
+    gmail_service = get_gmail_service()
+    subject, body, html = render_email(language, test_booking)
+    send_email(gmail_service, recipient, subject, body, html)
+    log(f"=== TESTE enviado: '{subject}' a {recipient} ===")
+    return {"test_sent": True, "recipient": recipient, "language": language}
+
+
 def run():
+    if os.getenv("SEND_TEST_NOW", "").lower() in ("true", "1", "yes"):
+        return send_test_email()
+
     log(f"=== pre_check_in_sender (DRY_RUN={DRY_RUN}) ===")
 
     spreadsheet = open_spreadsheet()

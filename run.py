@@ -22,24 +22,14 @@ def log(msg: str):
 
 
 def run_sync(trigger: str):
-    """Corre o sync Yescapa.
-
-    Desde 2026-05-16 a Yescapa removeu /conexao/ e bloqueou o login Playwright,
-    pelo que o sync rebenta com Timeout / SystemExit. NÃO relançamos a excepção
-    para que o pre_check_in_sender continue a correr e processe as reservas
-    manuais inseridas na sheet entretanto.
-    """
     log(f"A iniciar sync (trigger: {trigger})...")
     try:
         from yescapa_sheets import main
         main(trigger)
         log("Sync concluído com sucesso.")
-    except SystemExit as e:
-        log(f"Sync abortado (Yescapa bloqueado?): {e}")
-        # NÃO relançar — continua para pre_check_in
     except Exception as e:
         log(f"Erro no sync: {e}")
-        # NÃO relançar — falha no sync não deve abortar o resto do cron
+        raise
 
 
 def run_pre_check_in():
