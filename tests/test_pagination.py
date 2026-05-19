@@ -50,7 +50,11 @@ def test_pagination_confirmed_three_pages():
     for i in range(1, 21):
         yp._intercepted[i] = {"id": i, "meta_state": "confirmed", "state": "PAID"}
 
+    # Em producao a Yescapa devolve resultados tambem em p2 (10 items duplicados das
+    # primeiras 2 paginas ja pre-fetched pela SPA). Aqui simulamos isso: p2 devolve
+    # 10 items ja no _intercepted (sao ignorados pelo dedup). p3 traz os 3 novos.
     api_responses = {
+        2: [{"id": i, "meta_state": "confirmed", "state": "PAID"} for i in range(11, 21)],
         3: [{"id": i, "meta_state": "confirmed", "state": "PAID"} for i in range(21, 24)],
     }
     page = make_page_mock(api_responses, api_count=23)
