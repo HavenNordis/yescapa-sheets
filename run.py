@@ -9,6 +9,8 @@ Chamado pelo Railway como cron job com um argumento:
                                      depois tenta enviar emails de pré-check-in pendentes.
     python run.py --pre-check-in   → corre APENAS o envio de emails pré-check-in
                                      (sem tocar no sync; útil para testes manuais).
+    python run.py --drive-archive  → corre APENAS o arquivo de documentos no Drive
+                                     (sem tocar no sync; útil para testes manuais).
 """
 
 import sys
@@ -48,6 +50,22 @@ def run_pre_check_in():
         # NÃO relançar — falha no envio não deve abortar o cron job.
 
 
+def run_drive_archive():
+    """Arquiva no Google Drive os documentos das reservas (contrato, fatura).
+
+    Falhas aqui não interrompem o cron — os erros ficam registados na folha
+    Documentos para revisão manual.
+    """
+    log("A iniciar arquivo de documentos no Drive...")
+    try:
+        from drive_archiver import main as archive_docs
+        result = archive_docs()
+        log(f"Arquivo de documentos concluído: {result}")
+    except Exception as e:
+        log(f"Erro no arquivo de documentos: {e}")
+        # NÃO relançar — falha no arquivo não deve abortar o cron job.
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--scheduled"
 
@@ -62,19 +80,25 @@ def main():
         # Em ambos os casos (com ou sem sync) tentamos enviar pré-check-in pendentes,
         # para garantir que reservas que ficaram em backlog (por falha anterior) saem.
         run_pre_check_in()
+        run_drive_archive()
 
     elif mode == "--scheduled":
         log("Modo: agendamento")
         run_sync("scheduled")
         run_pre_check_in()
+        run_drive_archive()
 
     elif mode == "--pre-check-in":
         log("Modo: enviar pré-check-in apenas (sem sync)")
         run_pre_check_in()
 
+    elif mode == "--drive-archive":
+        log("Modo: arquivo de documentos apenas (sem sync)")
+        run_drive_archive()
+
     else:
         log(f"Argumento desconhecido: {mode}")
-        log("Uso: python run.py --email | --scheduled | --pre-check-in")
+        log("Uso: python run.py --email | --scheduled | --pre-check-in | --drive-archive")
         sys.exit(1)
 
 
