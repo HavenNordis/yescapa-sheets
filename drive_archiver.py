@@ -9,7 +9,7 @@ são acessíveis com os cookies do login).
 Lê a worksheet "Reservas" (read-only) e a worksheet "Documentos" (state tracking).
 
 Estrutura no Drive:
-  <pasta-raiz partilhada> / "#3391737 — Pablo Espinillo" / Contrato.pdf, Fatura.pdf
+  <Drive Partilhado> / <ano> / "#3391737 - Pablo Espinillo" / Contrato.pdf, Fatura.pdf
 
 Safeguards anti-duplicado / anti-quota:
   1. Folha "Documentos" é a source-of-truth do estado por booking_id.
@@ -117,8 +117,12 @@ def full_guest_name(row: dict) -> str:
 
 
 def booking_folder_name(ref: str, nome: str) -> str:
-    """Nome da subpasta da reserva: '#3391737 — Pablo Espinillo' (roadmap D1.2)."""
-    return sanitize_folder_name(f"#{ref} — {nome}")
+    """Nome da subpasta da reserva: '#3391737 - Pablo Espinillo'.
+
+    Hifen simples — alinhado com as pastas que o downloader anterior ja
+    criou no Drive Partilhado, para nao duplicar.
+    """
+    return sanitize_folder_name(f"#{ref} - {nome}")
 
 
 def is_archivable(row: dict) -> bool:
@@ -364,6 +368,51 @@ def upsert_state(ws, state_map: dict, booking_id: str, estado: str,
     state_map[booking_id].update({"estado": estado, "tentativas": tentativas})
 
 
+def _booking_year(row: dict) -> int:
+    """Ano da reserva a partir da Data Inicio (dd/mm/yyyy). Fallback: ano atual."""
+    m = re.search(r"(\d{4})", str(row.get("Data Início", "") or ""))
+    return int(m.group(1)) if m else datetime.now(timezone.utc).year
+
+
+def find_or_create_booking_folder(drive, ref, nome, parent_id):
+    """Get-or-create da subpasta da reserva, identificada pelo prefixo '#ref'.
+
+    Reaproveita uma pasta existente mesmo que o nome do hospede difira
+    (capitalizacao, espacos) — a chave estavel e o ID da reserva. Isto evita
+    duplicar as subpastas que o downloader anterior ja criou no Drive.
+    """
+    ref = str(ref).strip()
+    query = (
+        f"name contains '#{ref}' "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and '{parent_id}' in parents and trashed = false"
+    )
+    result = drive.files().list(
+        q=query, spaces="drive", fields="files(id, name)",
+        supportsAllDrives=True, includeItemsFromAllDrives=True,
+    ).execute()
+    for f in result.get("files", []):
+        name = f.get("name", "")
+        if name == f"#{ref}" or name.startswith(f"#{ref} ") or name.startswith(f"#{ref}-"):
+            return f["id"]
+    metadata = {
+        "name": booking_folder_name(ref, nome),
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    folder = drive.files().create(
+        body=metadata, fields="id", supportsAllDrives=True,
+    ).execute()
+    log(f"  pasta criada: '{metadata['name']}'")
+    return folder["id"]
+
+
+def resolve_booking_folder(drive, root_id, ref, nome, row):
+    """Get-or-create <raiz>/<ano>/#ref - nome. Devolve o folder_id da reserva."""
+    year_folder = find_or_create_folder(drive, str(_booking_year(row)), root_id)
+    return find_or_create_booking_folder(drive, ref, nome, year_folder)
+
+
 # --- Orquestração ---------------------------------------------------------
 
 def run() -> dict:
@@ -434,8 +483,8 @@ def run() -> dict:
             tentativas = int(prev.get("tentativas", 0) or 0)
 
             try:
-                folder_id = find_or_create_folder(
-                    drive, booking_folder_name(ref, nome), DRIVE_DOCS_ROOT_FOLDER_ID,
+                folder_id = resolve_booking_folder(
+                    drive, DRIVE_DOCS_ROOT_FOLDER_ID, ref, nome, row,
                 )
             except Exception as e:
                 log(f"  ✗ #{ref}: falha a criar pasta ({type(e).__name__}: {e})")

@@ -48,7 +48,7 @@ def test_full_guest_name_vazio():
 
 def test_booking_folder_name():
     from drive_archiver import booking_folder_name
-    assert booking_folder_name("3391737", "Pablo Espinillo") == "#3391737 — Pablo Espinillo"
+    assert booking_folder_name("3391737", "Pablo Espinillo") == "#3391737 - Pablo Espinillo"
 
 
 def test_is_archivable_confirmed():
@@ -117,3 +117,16 @@ def test_collect_doc_urls_relativo_fica_absoluto():
     from drive_archiver import collect_doc_urls
     urls = collect_doc_urls({"Contrato": "/doc/contrato.pdf"})
     assert urls["Contrato.pdf"].startswith("https://www.yescapa.pt/")
+
+
+def test_booking_year_da_data():
+    from drive_archiver import _booking_year
+    assert _booking_year({"Data Início": "06/05/2026"}) == 2026
+    assert _booking_year({"Data Início": "31/12/2027"}) == 2027
+
+
+def test_booking_year_fallback():
+    from datetime import datetime, timezone
+    from drive_archiver import _booking_year
+    assert _booking_year({"Data Início": ""}) == datetime.now(timezone.utc).year
+    assert _booking_year({}) == datetime.now(timezone.utc).year
