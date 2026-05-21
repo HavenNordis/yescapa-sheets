@@ -13,10 +13,9 @@ Fluxo (corre no cron, a seguir ao sync):
 
 Não envia email — só guarda no Drive (roadmap D2.4).
 
-⚠️  CALIBRAÇÃO PENDENTE: o mapeamento resposta-Tally → dados-da-checklist
-(função tally_to_checklist_data) usa correspondência por palavras-chave no
-título das perguntas. Os títulos exatos do formulário publicado têm de ser
-confirmados contra uma submissão real — ver as constantes KW_* abaixo.
+Mapeamento calibrado contra o formulário real (zx2ORZ) em 21/05/2026:
+os títulos das perguntas e os formatos das respostas foram confirmados
+contra submissões reais da API do Tally.
 
 Env vars:
   TALLY_API_KEY              (obrigatória — gerar em tally.so → Settings → API)
@@ -64,7 +63,7 @@ CHECKLISTS_MAX_PER_RUN = int(os.getenv("CHECKLISTS_MAX_PER_RUN", "15"))
 CHECKLISTS_HEADERS = [
     "tally_submission_id", "booking_id", "estado", "timestamp", "pdf_drive", "erro",
 ]
-ESTADOS_TERMINAIS = {"gerado", "sem_reserva"}
+ESTADOS_TERMINAIS = {"gerado"}  # sem_reserva/falhou são reprocessados
 
 # Palavras-chave para casar o título de cada pergunta Tally com o campo interno.
 # ⚠️ Confirmar contra uma submissão real — ver checklist_template_design.md.
@@ -154,10 +153,10 @@ def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
         "num_viajantes": booking.get("Viajantes", ""),
         "paises": str(booking.get("Países Permitidos", "") or "").strip(),
         # Camas / kit conforto
-        "kit_conforto": _is_sim(resp_kit) or "a" in _norm(resp_kit)[:1] or "b" in _norm(resp_kit)[:1],
+        "kit_conforto": _is_sim(resp_kit),
         "cama_cabine": _is_sim(answer_for(answers, KW_CAMA_CABINE)),
         "beliches": _is_sim(answer_for(answers, KW_BELICHES)),
-        "sala_grande": _is_sim(resp_sala_grande) or _norm(resp_sala_grande)[:1] in ("a", "b"),
+        "sala_grande": _is_sim(resp_sala_grande),
         "sala_grande_extensores": sala_grande_extensores(resp_sala_grande),
         "sala_pequena": _is_sim(answer_for(answers, KW_SALA_PEQUENA)),
         # Cozinha
@@ -195,11 +194,16 @@ def fetch_submissions(form_id: str) -> list:
     page = 1
     while True:
         payload = _tally_get(f"/forms/{form_id}/submissions?page={page}")
-        # Mapa questionId → título da pergunta.
-        questions = {
-            q.get("id"): q.get("title", "")
-            for q in payload.get("questions", [])
-        }
+        # Mapa questionId → título. Campos escondidos (ref, name…) têm
+        # title=null no nível da pergunta — o nome real está em fields[].title.
+        questions = {}
+        for q in payload.get("questions", []):
+            title = q.get("title")
+            if not title:
+                fields = q.get("fields") or []
+                if fields:
+                    title = fields[0].get("title", "")
+            questions[q.get("id")] = title or ""
         for sub in payload.get("submissions", []):
             if not sub.get("isCompleted", True):
                 continue
@@ -236,8 +240,13 @@ def _answer_text(answer) -> str:
     if isinstance(answer, (list, tuple)):
         return ", ".join(_answer_text(a) for a in answer if a not in (None, ""))
     if isinstance(answer, dict):
-        # Opções de escolha múltipla vêm muitas vezes como {id, text}.
-        return str(answer.get("text") or answer.get("label") or answer.get("value") or "")
+        # Escolha múltipla: {id, text}. Campo escondido: {nome_campo: valor}.
+        v = answer.get("text") or answer.get("label") or answer.get("value")
+        if v:
+            return str(v)
+        if len(answer) == 1:
+            return _answer_text(next(iter(answer.values())))
+        return ""
     return str(answer)
 
 
