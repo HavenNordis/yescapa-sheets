@@ -182,6 +182,13 @@ def _tally_get(path: str) -> dict:
         headers={
             "Authorization": f"Bearer {TALLY_API_KEY}",
             "Accept": "application/json",
+            # A API do Tally está atrás de Cloudflare e devolve 403 ao
+            # User-Agent por defeito do urllib — usar um UA de browser.
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
         },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -327,7 +334,12 @@ def run() -> dict:
             subs = fetch_submissions(form_id)
             log(f"  Tally [{form_id}]: {len(subs)} submissões")
         except urllib.error.HTTPError as e:
-            log(f"  ✗ Tally [{form_id}] HTTP {e.code} — a saltar formulário")
+            body = ""
+            try:
+                body = e.read().decode("utf-8", "ignore")[:160]
+            except Exception:
+                pass
+            log(f"  ✗ Tally [{form_id}] HTTP {e.code}: {body} — a saltar formulário")
             continue
         except Exception as e:
             log(f"  ✗ Tally [{form_id}] erro: {e} — a saltar formulário")
