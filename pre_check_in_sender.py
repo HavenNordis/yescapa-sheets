@@ -59,6 +59,12 @@ TALLY_FORM_URL = os.getenv("TALLY_FORM_URL", TALLY_FORM_URL_PT)
 SENDER_EMAIL = os.getenv("SENDER_EMAIL", "ops@havennordis.com")
 SENDER_NAME = os.getenv("SENDER_NAME", "Haven Nordis")
 
+# STAGING: se definida, redirecciona TODOS os emails para este endereco
+# (em vez do hospede real) e prefixa o subject com [STAGING].
+# Usado pelo Railway environment 'staging' para nao tocar nos clientes reais.
+EMAIL_REDIRECT_TO = os.getenv("EMAIL_REDIRECT_TO", "").strip()
+STAGING_SUBJECT_PREFIX = os.getenv("STAGING_SUBJECT_PREFIX", "[STAGING] ")
+
 GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID")
 GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET")
 GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN")
@@ -305,6 +311,14 @@ def get_gmail_service():
 
 
 def send_email(service, to: str, subject: str, body: str, html: str = ""):
+    # STAGING: redireccionar destinatario e prefixar subject.
+    # O 'to' original e o nome do hospede sao preservados no corpo do email
+    # via o template; aqui so substituimos o envelope.
+    if EMAIL_REDIRECT_TO:
+        original_to = to
+        to = EMAIL_REDIRECT_TO
+        subject = f"{STAGING_SUBJECT_PREFIX}({original_to}) {subject}"
+
     if html:
         msg = MIMEMultipart("alternative")
         msg.attach(MIMEText(body, "plain", "utf-8"))
@@ -360,6 +374,9 @@ def run():
         return send_test_email()
 
     log(f"=== pre_check_in_sender (DRY_RUN={DRY_RUN}) ===")
+    if EMAIL_REDIRECT_TO:
+        log(f"=== STAGING MODE: emails redireccionados para {EMAIL_REDIRECT_TO} ===")
+    log(f"    Sheet: '{SHEET_NAME}' / worksheet '{RESERVAS_WORKSHEET}'")
 
     spreadsheet = open_spreadsheet()
     reservas_ws = spreadsheet.worksheet(RESERVAS_WORKSHEET)
