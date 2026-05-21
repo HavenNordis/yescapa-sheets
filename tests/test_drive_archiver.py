@@ -130,3 +130,26 @@ def test_booking_year_fallback():
     from drive_archiver import _booking_year
     assert _booking_year({"Data Início": ""}) == datetime.now(timezone.utc).year
     assert _booking_year({}) == datetime.now(timezone.utc).year
+
+
+def test_classify_document():
+    from drive_archiver import classify_document
+    # A URL real da fatura do Yescapa contem "aluguer" — nao pode virar Contrato.
+    assert classify_document("https://www.yescapa.pt/minhas-reservas/factura_aluguer_3259112.pdf") == "Fatura.pdf"
+    assert classify_document("https://x.pt/contrato_123.pdf") == "Contrato.pdf"
+    assert classify_document("https://x.pt/doc.pdf", "Certificado de seguro") == "Seguro.pdf"
+    assert classify_document("https://x.pt/attestation_assurance.pdf") == "Seguro.pdf"
+    assert classify_document("https://x.pt/qualquer.pdf") is None
+
+
+def test_walk_urls():
+    from drive_archiver import _walk_urls
+    out = set()
+    _walk_urls({
+        "contract_url": "https://y.pt/contrato.pdf",
+        "pagina": "https://y.pt/alguma-pagina",
+        "lista": ["https://y.pt/factura_9.pdf", 5, None, ""],
+    }, out)
+    assert "https://y.pt/contrato.pdf" in out
+    assert "https://y.pt/factura_9.pdf" in out
+    assert "https://y.pt/alguma-pagina" not in out

@@ -2,38 +2,42 @@
 drive_archiver.py — Arquiva no Google Drive os documentos de cada reserva Yescapa.
 
 Para cada reserva confirmada ou já concluída (não cancelada) ainda sem documentos
-arquivados, cria uma subpasta no Drive e faz upload do Contrato e da Fatura
-descarregados do Yescapa (sessão autenticada via Playwright — os documentos só
-são acessíveis com os cookies do login).
+arquivados, cria uma subpasta no Drive e faz upload de:
+  - Fatura  — URL na folha "Reservas" (campo bill_url captado pelo sync)
+  - Contrato de aluguer + Certificado de seguro (DEV1.1) — descarregados da
+    página da reserva no Yescapa; a API NÃO os expõe (contract_url vem vazio),
+    só existem como links/botões de download na página da reserva.
+
+Tudo via uma sessão autenticada do Yescapa (Playwright — os documentos só são
+acessíveis com os cookies do login).
 
 Lê a worksheet "Reservas" (read-only) e a worksheet "Documentos" (state tracking).
 
 Estrutura no Drive:
-  <Drive Partilhado> / <ano> / "#3391737 - Pablo Espinillo" / Contrato.pdf, Fatura.pdf
+  <Drive Partilhado> / <ano> / "#3391737 - Pablo Espinillo" /
+      Contrato.pdf, Seguro.pdf, Fatura.pdf
 
 Safeguards anti-duplicado / anti-quota:
   1. Folha "Documentos" é a source-of-truth do estado por booking_id.
   2. Get-or-create de pastas e find-file antes de cada upload — idempotente,
      nunca duplica pastas nem ficheiros.
-  3. DOCS_MAX_PER_RUN limita o nº de reservas tratadas por execução, para
-     espalhar um backfill grande por vários crons (evita o rate-limit da
-     Sheets API, 60 escritas/min).
-  4. Playwright só arranca se houver mesmo reservas pendentes com documentos.
+  3. DOCS_MAX_PER_RUN limita o nº de reservas tratadas por execução.
+  4. Playwright só arranca se houver mesmo reservas pendentes.
 
 NOTA sobre o destino no Drive: a service account não tem quota de
-armazenamento própria. Para o upload de PDFs funcionar, DRIVE_DOCS_ROOT_FOLDER_ID
-deve apontar para um **Drive Partilhado** (Shared Drive) onde a service account
-seja membro — ou uma pasta dentro dele. Numa pasta normal de "O meu Drive" o
-upload de ficheiros binários pela service account falha com storageQuotaExceeded.
+armazenamento própria. DRIVE_DOCS_ROOT_FOLDER_ID deve apontar para um
+**Drive Partilhado** — numa pasta normal de "O meu Drive" o upload falha
+com storageQuotaExceeded.
 
 Env vars:
-  GOOGLE_CREDENTIALS_JSON     (service account — reutilizado do yescapa_sheets.py)
+  GOOGLE_CREDENTIALS_JSON     (service account)
   DRIVE_DOCS_ROOT_FOLDER_ID   (ID da pasta-raiz / Drive Partilhado de destino)
   GOOGLE_SHEET_NAME           (default: "Reservas Yescapa")
   WORKSHEET_NAME              (default: "Reservas")
   DOCS_WORKSHEET              (default: "Documentos")
   DOCS_MAX_PER_RUN            (default: "15")
   DOCS_MAX_ATTEMPTS           (default: "3")
+  DOCS_DEBUG                  (default: "false" — log detalhado do scraping)
   YESCAPA_EMAIL / YESCAPA_PASSWORD
   HEADLESS                    (default: "true")
 """
@@ -63,16 +67,16 @@ DRIVE_DOCS_ROOT_FOLDER_ID = os.getenv("DRIVE_DOCS_ROOT_FOLDER_ID", "").strip()
 
 DOCS_MAX_PER_RUN = int(os.getenv("DOCS_MAX_PER_RUN", "15"))
 DOCS_MAX_ATTEMPTS = int(os.getenv("DOCS_MAX_ATTEMPTS", "3"))
+DOCS_DEBUG = os.getenv("DOCS_DEBUG", "false").lower() in ("true", "1", "yes")
 
 YESCAPA_EMAIL = os.getenv("YESCAPA_EMAIL", "")
 YESCAPA_PASSWORD = os.getenv("YESCAPA_PASSWORD", "")
 YESCAPA_BASE = "https://www.yescapa.pt"
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
-# Colunas da folha "Reservas" com URLs de documentos → nome do ficheiro no Drive.
-# NOTA: o certificado de seguro ainda não é captado pelo sync (parse_booking só
-# expõe contract_url e bill_url). Acrescentar aqui assim que o campo da API for
-# identificado — ver roadmap D1.4.
+# Colunas da folha "Reservas" com URLs de documentos → nome do ficheiro.
+# A API só expõe a fatura (bill_url); o contrato/seguro vêm do scraping da
+# página da reserva (ver scrape_booking_documents — DEV1.1).
 DOC_COLUMNS = [
     ("Contrato", "Contrato.pdf"),
     ("Fatura", "Fatura.pdf"),
@@ -80,11 +84,19 @@ DOC_COLUMNS = [
 
 DOCS_HEADERS = [
     "booking_id", "estado", "timestamp", "pasta_drive",
-    "contrato", "fatura", "tentativas", "erro",
+    "contrato", "seguro", "fatura", "tentativas", "erro",
 ]
 
 # Estados terminais — reservas nestes estados não voltam a ser processadas.
 ESTADOS_TERMINAIS = {"arquivado", "falhou_permanente"}
+
+# Classificação de um URL/link de documento por palavras-chave.
+DOC_CLASSIFY = [
+    ("Fatura.pdf", ("fatura", "factur", "facture", "invoice", "bill")),
+    ("Seguro.pdf", ("seguro", "assur", "insur", "certificat", "attestation",
+                    "apolice", "apólice", "garantie")),
+    ("Contrato.pdf", ("contrato", "contract", "contrat", "agreement")),
+]
 
 
 # --- Logging --------------------------------------------------------------
@@ -153,6 +165,34 @@ def collect_doc_urls(row: dict) -> dict:
                 url = YESCAPA_BASE.rstrip("/") + "/" + url.lstrip("/")
             urls[filename] = url
     return urls
+
+
+def classify_document(url: str, label: str = ""):
+    """Classifica um URL/link como Contrato.pdf / Seguro.pdf / Fatura.pdf."""
+    blob = (str(url) + " " + str(label)).lower()
+    for filename, kws in DOC_CLASSIFY:
+        if any(k in blob for k in kws):
+            return filename
+    return None
+
+
+def _walk_urls(obj, out: set):
+    """Recolhe recursivamente, de uma estrutura JSON, strings que parecem
+    URLs de documentos (http + .pdf ou palavra-chave de documento)."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _walk_urls(v, out)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _walk_urls(v, out)
+    elif isinstance(obj, str):
+        s = obj.strip()
+        low = s.lower()
+        if s.lower().startswith("http") and (
+            ".pdf" in low
+            or any(k in low for _, kws in DOC_CLASSIFY for k in kws)
+        ):
+            out.add(s)
 
 
 # --- Google (service account — partilhado com o yescapa_sheets.py) --------
@@ -238,7 +278,7 @@ def file_url(file_id: str) -> str:
     return f"https://drive.google.com/file/d/{file_id}/view"
 
 
-# --- Yescapa (login + download autenticado) -------------------------------
+# --- Yescapa (login + download + scraping da página da reserva) -----------
 
 def yescapa_login(page):
     """Faz login no Yescapa. Os documentos só são acessíveis com estes cookies."""
@@ -317,20 +357,108 @@ def download_pdf(page, url: str):
     return body
 
 
+def scrape_booking_documents(page, booking_id: str) -> dict:
+    """DEV1.1 — Abre a página da reserva no Yescapa e devolve {nome_ficheiro: url}
+    para o contrato de aluguer e o certificado de seguro (e fatura, se aparecer).
+
+    A API do Yescapa não expõe o contrato nem o seguro (contract_url vem vazio),
+    por isso vamos buscá-los à página da reserva. Estratégia dupla:
+      (1) intercepta o JSON da API de detalhe que a SPA carrega e varre todos
+          os campos à procura de URLs de documentos;
+      (2) varre os links <a> do DOM.
+    Classifica cada URL por palavras-chave. Com DOCS_DEBUG, regista tudo o que vê.
+    """
+    captured = {"json": None}
+
+    def _on_response(resp):
+        try:
+            u = resp.url
+            if re.search(r"/v\d+/booking[^?]*/" + re.escape(str(booking_id)), u):
+                ct = (resp.headers or {}).get("content-type", "")
+                if "json" in ct:
+                    captured["json"] = resp.json()
+        except Exception:
+            pass
+
+    page.on("response", _on_response)
+    all_urls = set()
+    dom_label = {}
+    try:
+        page.goto(
+            f"{YESCAPA_BASE}/d/bookings/{booking_id}",
+            wait_until="networkidle", timeout=30_000,
+        )
+        page.wait_for_timeout(3500)
+    except Exception as e:
+        log(f"    [scrape #{booking_id}] erro ao abrir a página: {e}")
+    finally:
+        try:
+            page.remove_listener("response", _on_response)
+        except Exception:
+            pass
+
+    # (1) URLs vindas do JSON da API de detalhe.
+    if captured["json"]:
+        _walk_urls(captured["json"], all_urls)
+
+    # (2) Links <a> do DOM.
+    try:
+        dom_links = page.eval_on_selector_all(
+            "a",
+            "els => els.map(e => ({href: e.href || '', "
+            "text: (e.textContent || '').trim().slice(0, 80)}))",
+        )
+    except Exception:
+        dom_links = []
+    for lk in dom_links:
+        href = (lk.get("href") or "").strip()
+        text = (lk.get("text") or "").strip()
+        if not href.lower().startswith("http"):
+            continue
+        dom_label[href] = text
+        low = (href + " " + text).lower()
+        if ".pdf" in low or any(k in low for _, kws in DOC_CLASSIFY for k in kws):
+            all_urls.add(href)
+
+    if DOCS_DEBUG:
+        log(f"    [scrape #{booking_id}] JSON detalhe={'sim' if captured['json'] else 'nao'} "
+            f"| {len(dom_links)} links DOM | {len(all_urls)} URLs candidatas:")
+        for u in sorted(all_urls):
+            log(f"      · [{classify_document(u, dom_label.get(u, '')) or '?'}] {u[:150]}")
+
+    # Classificar — primeira URL que cair em cada categoria.
+    found = {}
+    for u in sorted(all_urls):
+        fn = classify_document(u, dom_label.get(u, ""))
+        if fn and fn not in found:
+            found[fn] = u
+    if not found:
+        log(f"    [scrape #{booking_id}] nenhum documento encontrado na página")
+    return found
+
+
 # --- Folha de estado "Documentos" -----------------------------------------
 
 def ensure_docs_worksheet(spreadsheet):
-    """Cria a worksheet 'Documentos' se não existir, com headers."""
+    """Cria/garante a worksheet 'Documentos' com os headers corretos.
+
+    Se os headers estiverem desalinhados (ex. esquema antigo sem a coluna
+    'seguro'), limpa a folha e reescreve — o re-arquivo é idempotente.
+    """
+    rng = f"A1:{chr(64 + len(DOCS_HEADERS))}1"  # A1:I1
     try:
         ws = spreadsheet.worksheet(DOCS_WORKSHEET)
         if ws.row_values(1) != DOCS_HEADERS:
-            log(f"Headers desalinhados em '{DOCS_WORKSHEET}', a corrigir.")
-            ws.update("A1:H1", [DOCS_HEADERS])
+            log(f"Headers de '{DOCS_WORKSHEET}' desalinhados — a recriar a folha.")
+            ws.clear()
+            ws.update(rng, [DOCS_HEADERS])
         return ws
     except gspread.exceptions.WorksheetNotFound:
         log(f"Worksheet '{DOCS_WORKSHEET}' não existe — a criar.")
-        ws = spreadsheet.add_worksheet(title=DOCS_WORKSHEET, rows=2000, cols=8)
-        ws.update("A1:H1", [DOCS_HEADERS])
+        ws = spreadsheet.add_worksheet(
+            title=DOCS_WORKSHEET, rows=2000, cols=len(DOCS_HEADERS),
+        )
+        ws.update(rng, [DOCS_HEADERS])
         return ws
 
 
@@ -342,26 +470,31 @@ def load_state(ws) -> dict:
         bid = str(row.get("booking_id", "")).strip()
         if not bid:
             continue
+        try:
+            tent = int(row.get("tentativas", 0) or 0)
+        except (ValueError, TypeError):
+            tent = 0
         state[bid] = {
             "estado": str(row.get("estado", "")).strip(),
-            "tentativas": int(row.get("tentativas", 0) or 0),
+            "tentativas": tent,
             "_row_index": idx + 2,  # +1 header, +1 base-1
         }
     return state
 
 
 def upsert_state(ws, state_map: dict, booking_id: str, estado: str,
-                 pasta: str = "", contrato: str = "", fatura: str = "",
-                 tentativas: int = 0, erro: str = ""):
+                 pasta: str = "", contrato: str = "", seguro: str = "",
+                 fatura: str = "", tentativas: int = 0, erro: str = ""):
     """Escreve (insert ou update) o estado de uma reserva na folha Documentos."""
     booking_id = str(booking_id)
     row_values = [
         booking_id, estado, now_iso(), pasta,
-        contrato, fatura, tentativas, erro,
+        contrato, seguro, fatura, tentativas, erro,
     ]
+    last_col = chr(64 + len(DOCS_HEADERS))  # 'I'
     if booking_id in state_map and "_row_index" in state_map[booking_id]:
         idx = state_map[booking_id]["_row_index"]
-        ws.update(f"A{idx}:H{idx}", [row_values])
+        ws.update(f"A{idx}:{last_col}{idx}", [row_values])
     else:
         ws.append_row(row_values, value_input_option="USER_ENTERED")
         state_map[booking_id] = {"_row_index": len(state_map) + 2}
@@ -378,8 +511,7 @@ def find_or_create_booking_folder(drive, ref, nome, parent_id):
     """Get-or-create da subpasta da reserva, identificada pelo prefixo '#ref'.
 
     Reaproveita uma pasta existente mesmo que o nome do hospede difira
-    (capitalizacao, espacos) — a chave estavel e o ID da reserva. Isto evita
-    duplicar as subpastas que o downloader anterior ja criou no Drive.
+    (capitalizacao, espacos) — a chave estavel e o ID da reserva.
     """
     ref = str(ref).strip()
     query = (
@@ -439,7 +571,9 @@ def run() -> dict:
     state_map = load_state(docs_ws)
     log(f"  → {len(state_map)} entradas de estado")
 
-    # Selecionar reservas pendentes: arquiváveis, com ≥1 URL, não terminais.
+    # Pendentes: arquiváveis, com ≥1 URL de documento na folha (tipicamente a
+    # fatura — que só aparece perto da estadia; o contrato/seguro são depois
+    # raspados da página da reserva), e ainda não terminais.
     pendentes = []
     for row in rows:
         if not is_archivable(row):
@@ -499,9 +633,20 @@ def run() -> dict:
                 time.sleep(0.4)
                 continue
 
-            doc_links = {"Contrato.pdf": "", "Fatura.pdf": ""}
-            falhas = []
+            # Documentos a arquivar: fatura (da folha) + contrato/seguro
+            # (raspados da página da reserva — DEV1.1).
+            try:
+                docs = scrape_booking_documents(page, ref)
+            except Exception as e:
+                log(f"  · #{ref}: scraping falhou ({type(e).__name__}: {e})")
+                docs = {}
+            # A folha tem prioridade para a fatura (URL tokenizada e fiável).
             for filename, url in urls.items():
+                docs[filename] = url
+
+            doc_links = {"Contrato.pdf": "", "Seguro.pdf": "", "Fatura.pdf": ""}
+            falhas = []
+            for filename, url in docs.items():
                 existing = find_file(drive, filename, folder_id)
                 if existing:
                     doc_links[filename] = file_url(existing)
@@ -518,10 +663,11 @@ def run() -> dict:
                     log(f"    ✗ upload falhou ({type(e).__name__}: {e})")
                     falhas.append(filename)
 
+            n_ok = len([v for v in doc_links.values() if v])
             if not falhas:
                 estado = "arquivado"
                 arquivados += 1
-                log(f"  ✓ #{ref}: arquivado ({len([v for v in doc_links.values() if v])} doc.)")
+                log(f"  ✓ #{ref}: arquivado ({n_ok} doc.)")
             else:
                 tentativas += 1
                 if tentativas >= DOCS_MAX_ATTEMPTS:
@@ -537,6 +683,7 @@ def run() -> dict:
                 docs_ws, state_map, ref, estado,
                 pasta=folder_url(folder_id),
                 contrato=doc_links.get("Contrato.pdf", ""),
+                seguro=doc_links.get("Seguro.pdf", ""),
                 fatura=doc_links.get("Fatura.pdf", ""),
                 tentativas=tentativas,
                 erro="" if not falhas else f"sem documento: {', '.join(falhas)}",
