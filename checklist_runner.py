@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 from checklist_generator import generate_checklist_pdf
 from drive_archiver import (
     get_google_clients, find_or_create_folder, find_file, upload_pdf,
-    booking_folder_name, full_guest_name, folder_url, file_url,
+    booking_folder_name, resolve_booking_folder, full_guest_name, folder_url, file_url,
     DRIVE_DOCS_ROOT_FOLDER_ID,
 )
 
@@ -355,8 +355,8 @@ def run() -> dict:
             data = tally_to_checklist_data(answers, booking)
             pdf = generate_checklist_pdf(data)
             nome = full_guest_name(booking)
-            folder_id = find_or_create_folder(
-                drive, booking_folder_name(ref, nome), DRIVE_DOCS_ROOT_FOLDER_ID,
+            folder_id = resolve_booking_folder(
+                drive, DRIVE_DOCS_ROOT_FOLDER_ID, ref, nome, booking,
             )
             filename = f"Checklist #{ref}.pdf"
             existing = find_file(drive, filename, folder_id)
