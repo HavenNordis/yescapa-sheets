@@ -571,30 +571,28 @@ def run() -> dict:
     state_map = load_state(docs_ws)
     log(f"  → {len(state_map)} entradas de estado")
 
-    # Pendentes: arquiváveis, com ≥1 URL de documento na folha (tipicamente a
-    # fatura — que só aparece perto da estadia; o contrato/seguro são depois
-    # raspados da página da reserva), e ainda não terminais.
+    # Pendentes: todas as reservas arquiváveis e ainda não terminais.
+    # Já NÃO exigimos URL da fatura na folha — o contrato e o seguro vêm da
+    # página da reserva (estão disponíveis logo após a confirmação), e a
+    # fatura é acrescentada quando o Yescapa a gera (URL na folha).
     pendentes = []
     for row in rows:
         if not is_archivable(row):
             continue
-        urls = collect_doc_urls(row)
-        if not urls:
-            continue  # sem documentos disponíveis ainda — re-verifica num run futuro
         ref = str(row.get("ID", "")).strip()
         estado_atual = state_map.get(ref, {}).get("estado", "")
         if estado_atual in ESTADOS_TERMINAIS:
             continue
-        pendentes.append((ref, row, urls))
+        pendentes.append((ref, row))
 
     if not pendentes:
         log("Nada a arquivar — todas as reservas elegíveis já estão tratadas.")
-        return {"arquivados": 0, "parciais": 0, "falhados": 0, "pendentes": 0}
+        return {"arquivados": 0, "aguarda_fatura": 0, "parciais": 0, "falhados": 0, "pendentes": 0}
 
     lote = pendentes[:DOCS_MAX_PER_RUN]
     log(f"{len(pendentes)} reservas pendentes — a processar {len(lote)} neste run.")
 
-    arquivados = parciais = falhados = 0
+    arquivados = aguarda_fatura_count = parciais = falhados = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -608,10 +606,15 @@ def run() -> dict:
             ),
         )
         page = context.new_page()
-        log("A fazer login no Yescapa...")
-        yescapa_login(page)
+        logged_in = [False]  # login lazy — só quando precisamos mesmo de descarregar.
 
-        for ref, row, urls in lote:
+        def ensure_login():
+            if not logged_in[0]:
+                log("A fazer login no Yescapa...")
+                yescapa_login(page)
+                logged_in[0] = True
+
+        for ref, row in lote:
             nome = full_guest_name(row)
             prev = state_map.get(ref, {})
             tentativas = int(prev.get("tentativas", 0) or 0)
@@ -633,51 +636,90 @@ def run() -> dict:
                 time.sleep(0.4)
                 continue
 
-            # Documentos a arquivar: fatura (da folha) + contrato/seguro
-            # (raspados da página da reserva — DEV1.1).
-            try:
-                docs = scrape_booking_documents(page, ref)
-            except Exception as e:
-                log(f"  · #{ref}: scraping falhou ({type(e).__name__}: {e})")
-                docs = {}
-            # A folha tem prioridade para a fatura (URL tokenizada e fiável).
-            for filename, url in urls.items():
-                docs[filename] = url
+            # O que já está no Drive?
+            doc_links = {}
+            for fn in ("Contrato.pdf", "Seguro.pdf", "Fatura.pdf"):
+                fid = find_file(drive, fn, folder_id)
+                if fid:
+                    doc_links[fn] = file_url(fid)
+            missing = [fn for fn in ("Contrato.pdf", "Seguro.pdf", "Fatura.pdf")
+                       if fn not in doc_links]
 
-            doc_links = {"Contrato.pdf": "", "Seguro.pdf": "", "Fatura.pdf": ""}
-            falhas = []
-            for filename, url in docs.items():
-                existing = find_file(drive, filename, folder_id)
-                if existing:
-                    doc_links[filename] = file_url(existing)
-                    continue
-                log(f"  #{ref} '{nome}' → {filename}")
-                pdf = download_pdf(page, url)
-                if not pdf:
-                    falhas.append(filename)
-                    continue
-                try:
-                    fid = upload_pdf(drive, pdf, filename, folder_id)
-                    doc_links[filename] = file_url(fid)
-                except Exception as e:
-                    log(f"    ✗ upload falhou ({type(e).__name__}: {e})")
-                    falhas.append(filename)
-
-            n_ok = len([v for v in doc_links.values() if v])
-            if not falhas:
+            if not missing:
                 estado = "arquivado"
                 arquivados += 1
-                log(f"  ✓ #{ref}: arquivado ({n_ok} doc.)")
+                log(f"  ✓ #{ref}: já estava tudo arquivado")
+                upsert_state(
+                    docs_ws, state_map, ref, estado,
+                    pasta=folder_url(folder_id),
+                    contrato=doc_links.get("Contrato.pdf", ""),
+                    seguro=doc_links.get("Seguro.pdf", ""),
+                    fatura=doc_links.get("Fatura.pdf", ""),
+                    tentativas=tentativas,
+                )
+                time.sleep(0.4)
+                continue
+
+            # Recolher URLs dos documentos em falta:
+            #   - Fatura: coluna 'Fatura' da folha (URL tokenizada do Yescapa)
+            #   - Contrato/Seguro: raspagem da página da reserva (DEV1.1)
+            doc_urls = {}
+            sheet_urls = collect_doc_urls(row)
+            if "Fatura.pdf" in missing and "Fatura.pdf" in sheet_urls:
+                doc_urls["Fatura.pdf"] = sheet_urls["Fatura.pdf"]
+
+            need_scrape = ("Contrato.pdf" in missing) or ("Seguro.pdf" in missing)
+            if need_scrape:
+                ensure_login()
+                try:
+                    scraped = scrape_booking_documents(page, ref)
+                except Exception as e:
+                    log(f"  · #{ref}: scraping falhou ({type(e).__name__}: {e})")
+                    scraped = {}
+                for fn in ("Contrato.pdf", "Seguro.pdf", "Fatura.pdf"):
+                    if fn in missing and fn in scraped:
+                        doc_urls.setdefault(fn, scraped[fn])
+
+            falhas = []
+            if doc_urls:
+                ensure_login()
+            for fn, url in doc_urls.items():
+                log(f"  #{ref} '{nome}' → {fn}")
+                pdf = download_pdf(page, url)
+                if not pdf:
+                    falhas.append(fn)
+                    continue
+                try:
+                    fid = upload_pdf(drive, pdf, fn, folder_id)
+                    doc_links[fn] = file_url(fid)
+                except Exception as e:
+                    log(f"    ✗ upload falhou ({type(e).__name__}: {e})")
+                    falhas.append(fn)
+
+            still_missing = [fn for fn in ("Contrato.pdf", "Seguro.pdf", "Fatura.pdf")
+                             if fn not in doc_links]
+
+            if not still_missing:
+                estado = "arquivado"
+                arquivados += 1
+                log(f"  ✓ #{ref}: arquivado ({len(doc_links)} doc.)")
+            elif still_missing == ["Fatura.pdf"] and not falhas:
+                # Contrato+seguro arquivados; a fatura ainda não foi gerada pelo
+                # Yescapa. Próximo run só verifica a coluna Fatura — sem voltar
+                # a navegar a página da reserva.
+                estado = "aguarda_fatura"
+                aguarda_fatura_count += 1
+                log(f"  · #{ref}: aguarda fatura (contrato+seguro arquivados)")
             else:
                 tentativas += 1
                 if tentativas >= DOCS_MAX_ATTEMPTS:
                     estado = "falhou_permanente"
                     falhados += 1
-                    log(f"  ✗ #{ref}: falhou em definitivo após {tentativas} tentativas")
+                    log(f"  ✗ #{ref}: falhou em definitivo após {tentativas} tentativas — em falta: {still_missing}")
                 else:
                     estado = "parcial"
                     parciais += 1
-                    log(f"  · #{ref}: parcial (tentativa {tentativas}) — falhou: {falhas}")
+                    log(f"  · #{ref}: parcial (tentativa {tentativas}) — em falta: {still_missing}, falhas: {falhas}")
 
             upsert_state(
                 docs_ws, state_map, ref, estado,
@@ -686,7 +728,7 @@ def run() -> dict:
                 seguro=doc_links.get("Seguro.pdf", ""),
                 fatura=doc_links.get("Fatura.pdf", ""),
                 tentativas=tentativas,
-                erro="" if not falhas else f"sem documento: {', '.join(falhas)}",
+                erro="" if not still_missing else f"em falta: {', '.join(still_missing)}",
             )
             time.sleep(0.4)  # folga para a Sheets API (limite 60 escritas/min)
 
@@ -694,11 +736,12 @@ def run() -> dict:
 
     restantes = len(pendentes) - len(lote)
     log(
-        f"=== Fim: arquivados={arquivados} parciais={parciais} "
-        f"falhados={falhados} | {restantes} ainda na fila ==="
+        f"=== Fim: arquivados={arquivados} aguarda_fatura={aguarda_fatura_count} "
+        f"parciais={parciais} falhados={falhados} | {restantes} ainda na fila ==="
     )
     return {
         "arquivados": arquivados,
+        "aguarda_fatura": aguarda_fatura_count,
         "parciais": parciais,
         "falhados": falhados,
         "pendentes": restantes,
