@@ -33,6 +33,9 @@ import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LISBON_TZ = ZoneInfo("Europe/Lisbon")
 
 import gspread
 from dotenv import load_dotenv
@@ -91,7 +94,7 @@ def log(msg: str):
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H:%M:%S")
+    return datetime.now(LISBON_TZ).strftime("%Y-%m-%d_%H:%M:%S")
 
 
 # --- Funções puras (testáveis) --------------------------------------------

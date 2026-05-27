@@ -18,6 +18,9 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LISBON_TZ = ZoneInfo("Europe/Lisbon")
 
 import gspread
 from dotenv import load_dotenv
@@ -436,7 +439,7 @@ class SheetsClient:
             ws.format("A1:C1", {"textFormat": {"bold": True}})
             print(f"Separador '{log_sheet_name}' criado.")
 
-        now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
+        now = datetime.now(LISBON_TZ).strftime("%d/%m/%Y %H:%M:%S")
         motivo = "Email (nova reserva)" if trigger == "email" else "Agendamento"
 
         # Procurar TODAS as linhas com este motivo (e não só a primeira),
