@@ -30,6 +30,9 @@ import json
 import os
 import urllib.parse
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LISBON_TZ = ZoneInfo("Europe/Lisbon")
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
@@ -94,7 +97,7 @@ def log(msg: str):
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H:%M:%S")
+    return datetime.now(LISBON_TZ).strftime("%Y-%m-%d_%H:%M:%S")
 
 
 # --- Google Sheets (service account, partilha do yescapa_sheets.py) ---
