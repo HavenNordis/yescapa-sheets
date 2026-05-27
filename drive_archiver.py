@@ -48,6 +48,9 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LISBON_TZ = ZoneInfo("Europe/Lisbon")
 
 import gspread
 from dotenv import load_dotenv
@@ -107,7 +110,7 @@ def log(msg: str):
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H:%M:%S")
+    return datetime.now(LISBON_TZ).strftime("%Y-%m-%d_%H:%M:%S")
 
 
 # --- Funções puras (testáveis sem rede) -----------------------------------
@@ -587,12 +590,12 @@ def run() -> dict:
 
     if not pendentes:
         log("Nada a arquivar — todas as reservas elegíveis já estão tratadas.")
-        return {"arquivados": 0, "aguarda_fatura": 0, "parciais": 0, "falhados": 0, "pendentes": 0}
+        return {"arquivados": 0, "aguarda_fatura": 0, "aguarda_documentos": 0, "parciais": 0, "falhados": 0, "pendentes": 0}
 
     lote = pendentes[:DOCS_MAX_PER_RUN]
     log(f"{len(pendentes)} reservas pendentes — a processar {len(lote)} neste run.")
 
-    arquivados = aguarda_fatura_count = parciais = falhados = 0
+    arquivados = aguarda_fatura_count = aguarda_documentos_count = parciais = falhados = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -703,13 +706,18 @@ def run() -> dict:
                 estado = "arquivado"
                 arquivados += 1
                 log(f"  ✓ #{ref}: arquivado ({len(doc_links)} doc.)")
-            elif still_missing == ["Fatura.pdf"] and not falhas:
-                # Contrato+seguro arquivados; a fatura ainda não foi gerada pelo
-                # Yescapa. Próximo run só verifica a coluna Fatura — sem voltar
-                # a navegar a página da reserva.
-                estado = "aguarda_fatura"
-                aguarda_fatura_count += 1
-                log(f"  · #{ref}: aguarda fatura (contrato+seguro arquivados)")
+            elif not falhas:
+                # Nada falhou — a Yescapa ainda não emitiu os documentos
+                # que faltam. Não conta como tentativa.
+                tentativas = 0
+                if still_missing == ["Fatura.pdf"]:
+                    estado = "aguarda_fatura"
+                    aguarda_fatura_count += 1
+                    log(f"  · #{ref}: aguarda fatura (contrato+seguro arquivados)")
+                else:
+                    estado = "aguarda_documentos"
+                    aguarda_documentos_count += 1
+                    log(f"  · #{ref}: aguarda documentos do Yescapa (em falta: {still_missing})")
             else:
                 tentativas += 1
                 if tentativas >= DOCS_MAX_ATTEMPTS:
@@ -737,11 +745,13 @@ def run() -> dict:
     restantes = len(pendentes) - len(lote)
     log(
         f"=== Fim: arquivados={arquivados} aguarda_fatura={aguarda_fatura_count} "
-        f"parciais={parciais} falhados={falhados} | {restantes} ainda na fila ==="
+        f"aguarda_documentos={aguarda_documentos_count} parciais={parciais} "
+        f"falhados={falhados} | {restantes} ainda na fila ==="
     )
     return {
         "arquivados": arquivados,
         "aguarda_fatura": aguarda_fatura_count,
+        "aguarda_documentos": aguarda_documentos_count,
         "parciais": parciais,
         "falhados": falhados,
         "pendentes": restantes,
