@@ -85,15 +85,17 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--scheduled"
 
     if mode == "--email":
-        log("Modo: verificação de email")
+        log("Modo: cron + verificação de email")
         from email_checker import has_new_booking_email, mark_booking_emails_read
-        if has_new_booking_email():
-            run_sync("email")
-            mark_booking_emails_read()
+        new_email = has_new_booking_email()
+        if new_email:
+            log("Email novo de reserva detectado.")
         else:
-            log("Sem emails novos do Yescapa.")
-        # Em ambos os casos (com ou sem sync) corremos os passos pós-sync,
-        # para garantir que reservas em backlog (por falha anterior) saem.
+            log("Sem emails novos do Yescapa — sync na mesma (cron).")
+        # Sync sempre — mantém a folha em dia com o Yescapa em cada run.
+        run_sync("email" if new_email else "scheduled")
+        if new_email:
+            mark_booking_emails_read()
         run_pre_check_in()
         run_drive_archive()
         run_checklist()
