@@ -340,24 +340,35 @@ def yescapa_login(page):
 
 
 def download_pdf(page, url: str):
-    """Descarrega um PDF via a sessão autenticada. Devolve bytes ou None."""
+    """Descarrega um PDF via a sessão autenticada.
+
+    Devolve uma tupla `(bytes_ou_None, motivo)` onde `motivo` é:
+      - "ok"        — descarga com sucesso (bytes != None)
+      - "not_ready" — Yescapa devolveu HTML em vez de PDF (documento ainda
+                      não emitido / "em validação"). Não conta como falha
+                      técnica — só significa que ainda não há documento.
+      - "error"     — erro de rede, HTTP != 2xx, ou exception. Falha real
+                      que deve incrementar tentativas.
+    """
     try:
         resp = page.request.get(url, timeout=25_000)
     except Exception as e:
         log(f"    erro de rede: {e}")
-        return None
+        return None, "error"
     if not resp.ok:
         log(f"    HTTP {resp.status}")
-        return None
+        return None, "error"
     try:
         body = resp.body()
     except Exception as e:
         log(f"    erro a ler corpo: {e}")
-        return None
+        return None, "error"
     if body[:4] != b"%PDF":
-        log(f"    resposta não é PDF (primeiros bytes: {body[:8]!r})")
-        return None
-    return body
+        # Tipicamente HTML: Yescapa serve uma página de "documentos em
+        # validação" quando o doc ainda não foi emitido.
+        log(f"    resposta não é PDF (primeiros bytes: {body[:8]!r}) — documento ainda não disponível")
+        return None, "not_ready"
+    return body, "ok"
 
 
 def scrape_booking_documents(page, booking_id: str) -> dict:
@@ -683,14 +694,18 @@ def run() -> dict:
                     if fn in missing and fn in scraped:
                         doc_urls.setdefault(fn, scraped[fn])
 
-            falhas = []
+            falhas = []        # erros REAIS (rede, HTTP, upload, exception)
+            nao_prontos = []   # Yescapa ainda não emitiu (HTML em vez de PDF)
             if doc_urls:
                 ensure_login()
             for fn, url in doc_urls.items():
                 log(f"  #{ref} '{nome}' → {fn}")
-                pdf = download_pdf(page, url)
-                if not pdf:
-                    falhas.append(fn)
+                pdf, motivo = download_pdf(page, url)
+                if pdf is None:
+                    if motivo == "not_ready":
+                        nao_prontos.append(fn)
+                    else:
+                        falhas.append(fn)
                     continue
                 try:
                     fid = upload_pdf(drive, pdf, fn, folder_id)
