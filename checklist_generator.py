@@ -5,16 +5,23 @@ PDF de 2 páginas (A4 landscape):
   Página 1 — Checklist Operacional (preparação da carrinha pela equipa)
   Página 2 — Roteiro de Limpeza (para as empregadas)
 
-Versão parametrizada dos templates validados com a reserva Walmyr (#3259112).
-Os campos condicionais (camas, equipamentos, kit conforto, etc.) são resolvidos
-em texto concreto — a contagem de linhas é fixa, por isso o layout nunca varia.
+Versão parametrizada validada com a reserva Walmyr (#3259112). Suporta
+múltiplos layouts de camas via a chave `layout` em `data`:
+  "fjord"   — Fjord / Runa / Celta (cabine 160, beliches 90, sala grande 140,
+              sala pequena 70x160). Default para retro-compatibilidade.
+  "krafie"  — Krafie (cama de cima elétrica 135 e cama convertível sala 150,
+              ambas com roupa 140).
+
+A roupa de cama é resolvida bed-a-bed conforme as camas escolhidas (e o kit
+conforto): resguardo, lençol de baixo, edredon + capa e — quando aplicável —
+extensores. Fronhas e toalhas são por número de viajantes.
 
 Uso:
     from checklist_generator import generate_checklist_pdf
     pdf_bytes = generate_checklist_pdf(data)        # devolve bytes do PDF
 
 `data` é um dict — ver normalize_checklist_data() para as chaves aceites.
-Correr este ficheiro diretamente gera um PDF de exemplo (dados Walmyr).
+Correr este ficheiro diretamente gera dois PDFs de exemplo (Walmyr + Krafie).
 """
 
 import io
@@ -52,6 +59,82 @@ def hx(h):
     return colors.HexColor(h)
 
 
+# --- Especificação das camas e layouts por viatura ------------------------
+#
+# BED_SPECS — para cada tipo de cama, o título e a lista de itens de roupa
+# que essa cama precisa, com quantidades. As quantidades são por instância
+# da cama (não por hóspede).
+#
+# LAYOUTS — para cada tipo de viatura, a sequência ordenada de
+# (bed_id, flag_em_data) que define que camas mostrar na checklist.
+
+BED_SPECS = {
+    "cabine_160": {
+        "title": "Cama cabine (casal 160×210)",
+        "items": [
+            ("Resguardo 160", 1),
+            ("Lençol de baixo 160", 1),
+            ("Edredon + capa casal", 1),
+        ],
+    },
+    "beliches_90": {
+        "title": "Beliches (2 individuais 90×210)",
+        "items": [
+            ("Resguardo 90", 2),
+            ("Lençol de baixo 90", 2),
+            ("Edredon + capa solteiro", 2),
+        ],
+    },
+    "sala_grande_140": {
+        "title": "Cama convertível sala grande (casal 140)",
+        "items": [
+            ("Extensor (meio)", 1),
+            ("Resguardo 140", 1),
+            ("Lençol de baixo 140", 1),
+            ("Edredon + capa casal", 1),
+        ],
+    },
+    "sala_pequena_70x160": {
+        "title": "Cama convertível sala pequena (criança 70×160)",
+        "items": [
+            ("Extensor", 1),
+            ("Resguardo 70×160", 1),
+            ("Lençol de baixo 70×160", 1),
+            ("Edredon + capa solteiro", 1),
+        ],
+    },
+    "cima_eletrica_135": {
+        "title": "Cama de cima elétrica (casal 135×200)",
+        "items": [
+            ("Resguardo 140", 1),
+            ("Lençol de baixo 140", 1),
+            ("Edredon + capa casal", 1),
+        ],
+    },
+    "convertivel_sala_150": {
+        "title": "Cama convertível sala (casal 150×175)",
+        "items": [
+            ("Resguardo 140", 1),
+            ("Lençol de baixo 140", 1),
+            ("Edredon + capa casal", 1),
+        ],
+    },
+}
+
+LAYOUTS = {
+    "fjord": [
+        ("cabine_160", "cama_cabine"),
+        ("beliches_90", "beliches"),
+        ("sala_grande_140", "sala_grande"),
+        ("sala_pequena_70x160", "sala_pequena"),
+    ],
+    "krafie": [
+        ("cima_eletrica_135", "cama_cima_eletrica"),
+        ("convertivel_sala_150", "cama_convertivel_sala"),
+    ],
+}
+
+
 # --- Normalização de dados ------------------------------------------------
 
 def _as_bool(v) -> bool:
@@ -68,17 +151,22 @@ def _as_int(v, default=0) -> int:
 
 
 def normalize_checklist_data(raw: dict) -> dict:
-    """Devolve um dict completo com todas as chaves, defaults e totais calculados.
+    """Devolve um dict completo com defaults aplicados.
 
     Chaves de entrada aceites (todas opcionais):
       cliente_nome, reserva_ref, viatura, pickup, dropoff, num_viajantes,
-      paises, kit_conforto, cama_cabine, beliches, sala_grande,
-      sala_grande_extensores, sala_pequena, microondas, maquina_cafe,
-      mesa_exterior, num_cadeiras, num_bancos, via_verde, cadeira_auto, notas
+      paises, kit_conforto, layout (default "fjord"),
+      cama_cabine, beliches, sala_grande, sala_grande_extensores, sala_pequena,
+      cama_cima_eletrica, cama_convertivel_sala,
+      microondas, maquina_cafe, mesa_exterior, num_cadeiras, num_bancos,
+      via_verde, cadeira_auto, notas
     """
     raw = raw or {}
     viajantes = _as_int(raw.get("num_viajantes"), 0)
     notas = [str(n).strip() for n in (raw.get("notas") or []) if str(n).strip()]
+    layout = str(raw.get("layout") or "fjord").strip().lower()
+    if layout not in LAYOUTS:
+        layout = "fjord"
 
     return {
         "cliente_nome": str(raw.get("cliente_nome", "") or "").strip() or "—",
@@ -89,11 +177,17 @@ def normalize_checklist_data(raw: dict) -> dict:
         "num_viajantes": viajantes,
         "paises": str(raw.get("paises", "") or "").strip() or "—",
         "kit_conforto": _as_bool(raw.get("kit_conforto")),
+        "layout": layout,
+        # Fjord beds
         "cama_cabine": _as_bool(raw.get("cama_cabine")),
         "beliches": _as_bool(raw.get("beliches")),
         "sala_grande": _as_bool(raw.get("sala_grande")),
         "sala_grande_extensores": _as_int(raw.get("sala_grande_extensores"), 1),
         "sala_pequena": _as_bool(raw.get("sala_pequena")),
+        # Krafie beds
+        "cama_cima_eletrica": _as_bool(raw.get("cama_cima_eletrica")),
+        "cama_convertivel_sala": _as_bool(raw.get("cama_convertivel_sala")),
+        # Cozinha / serviços / exterior
         "microondas": _as_bool(raw.get("microondas")),
         "maquina_cafe": _as_bool(raw.get("maquina_cafe")),
         "mesa_exterior": _as_bool(raw.get("mesa_exterior")),
@@ -102,10 +196,10 @@ def normalize_checklist_data(raw: dict) -> dict:
         "via_verde": _as_bool(raw.get("via_verde")),
         "cadeira_auto": _as_bool(raw.get("cadeira_auto")),
         "notas": notas,
-        # Totais calculados (1 por hóspede) — design v1.0
+        # Totais por hóspede (fronhas + toalhas) — design v2.0
         "total_fronhas": viajantes,
-        "total_sacos_cama": viajantes,
-        "total_toalhas": viajantes,
+        "total_toalhas_grandes": viajantes,
+        "total_toalhas_rosto": viajantes,
     }
 
 
@@ -175,40 +269,49 @@ def _header(c, title, subtitle):
 # --- Resolução dos campos condicionais em texto ---------------------------
 
 def _bed_lines(d: dict) -> list:
-    """Resolve as 5 linhas de roupa de cama conforme as camas pedidas."""
-    if not d["kit_conforto"]:
-        traz = "hóspede traz a sua roupa"
-        return [
-            f"Cama cabine (casal): {traz if d['cama_cabine'] else 'N/A'}",
-            f"Beliches (2 individuais): {traz if d['beliches'] else 'N/A'}",
-            f"Cama convertível sala grande: {traz if d['sala_grande'] else 'N/A'}",
-            f"Extensor cama sala grande — {d['sala_grande_extensores'] if d['sala_grande'] else 'N/A'}",
-            f"Cama sala pequena (criança): {traz if d['sala_pequena'] else 'N/A'}",
-        ]
-    return [
-        "Cama cabine (casal): Lençol de baixo 160 — 1" if d["cama_cabine"]
-        else "Cama cabine (casal): N/A",
-        "Beliches (2 individuais): Lençóis de baixo 90 — 2" if d["beliches"]
-        else "Beliches (2 individuais): N/A",
-        "Cama convertível sala grande: Lençol + Resguardo 140 — 1 cada" if d["sala_grande"]
-        else "Cama convertível sala grande: N/A",
-        f"Extensor cama sala grande — {d['sala_grande_extensores']}" if d["sala_grande"]
-        else "Extensor cama sala grande — N/A",
-        "Cama sala pequena (criança): Lençol — 1" if d["sala_pequena"]
-        else "Cama sala pequena (criança): N/A",
-    ]
+    """Constrói as linhas de roupa de cama para a checklist.
+
+    Cada cama escolhida produz 2 linhas:
+      1) nome da cama
+      2) itens de roupa separados por · (ponto-mediano)
+    Camas não escolhidas viram 1 linha "<nome> — N/A".
+    Sem kit conforto vira 1 linha "<nome> — hóspede traz a sua roupa".
+
+    Quantidades:
+      - 1× → só o nome do item ("Resguardo 160")
+      - 2× ou mais → prefixado ("2× Resguardo 90")
+    O Fjord sala grande acrescenta "+ 2× Extensor lateral" quando o hóspede
+    escolhe a opção com os 2 extensores laterais.
+    """
+    layout = LAYOUTS.get(d.get("layout", "fjord"), LAYOUTS["fjord"])
+    lines = []
+    for bed_id, flag in layout:
+        spec = BED_SPECS[bed_id]
+        title = spec["title"]
+        chosen = bool(d.get(flag))
+        if not chosen:
+            lines.append(f"{title} — N/A")
+            continue
+        if not d.get("kit_conforto"):
+            lines.append(f"{title} — hóspede traz a sua roupa")
+            continue
+        parts = [f"{qty}× {name}" if qty > 1 else name for name, qty in spec["items"]]
+        if bed_id == "sala_grande_140" and _as_int(d.get("sala_grande_extensores"), 1) >= 2:
+            parts.append("2× Extensor lateral")
+        lines.append(title)
+        lines.append("   " + " · ".join(parts))
+    return lines
 
 
 def _towel_lines(d: dict) -> list:
-    if not d["kit_conforto"]:
+    """Fronhas + toalhas, sempre 1 por hóspede."""
+    if not d.get("kit_conforto"):
         return [
-            "Fronhas — hóspede traz  |  Sacos cama — hóspede traz",
-            "Toalhas grandes — hóspede traz  |  Toalhas pequenas — hóspede traz",
+            "Fronhas — hóspede traz  |  Toalhas — hóspede traz",
         ]
     n = d["num_viajantes"]
     return [
-        f"Fronhas — {d['total_fronhas']}  |  Sacos cama — {d['total_sacos_cama']}",
-        f"Toalhas grandes — {n}  |  Toalhas pequenas — {n}",
+        f"Fronhas — {n}  |  Toalhas grandes — {n}  |  Toalhas rosto — {n}",
     ]
 
 
@@ -254,9 +357,9 @@ def _draw_page1(c, d: dict):
     # Coluna esquerda
     cx, cy = ML, y
     cy = _section(c, cx, cy, CW, "🔵  SACO AZUL — ROUPA", COL["blue"])
-    cy = _sub(c, cx, cy, CW, "Roupa de Cama", COL["blue"])
+    cy = _sub(c, cx, cy, CW, "Roupa de Cama (conforme camas escolhidas)", COL["blue"])
     cy = _items(c, cx, cy, CW, _bed_lines(d), COL["blue_light"])
-    cy = _sub(c, cx, cy, CW, f"Totais e Toalhas ({d['num_viajantes']} hóspedes)", COL["blue"])
+    cy = _sub(c, cx, cy, CW, f"Fronhas e Toalhas ({d['num_viajantes']} hóspedes)", COL["blue"])
     cy = _items(c, cx, cy, CW, _towel_lines(d), COL["blue_light"])
 
     cy -= 2 * mm
@@ -271,8 +374,7 @@ def _draw_page1(c, d: dict):
         "Sacos lixo 30L",
         "Pano de limpeza",
         "Pastilhas sanita química",
-        "Café (cápsulas/pó para máquina)" if d["maquina_cafe"] else "Café (máquina) — N/A",
-    ], COL["green_light"])
+    ] + (["Café (cápsulas/pó para máquina)"] if d["maquina_cafe"] else []), COL["green_light"])
     cy = _sub(c, cx, cy, CW, "Documentos (impressos)", COL["green"])
     cy = _items(c, cx, cy, CW, [
         "Contrato de aluguer impresso",
@@ -450,7 +552,7 @@ def save_checklist_pdf(data: dict, path: str) -> str:
     return path
 
 
-# Dados de exemplo — reserva Walmyr #3259112 (modelo de validação v1.0).
+# Dados de exemplo — reserva Walmyr #3259112 (Fjord, modelo de validação v1.0).
 EXEMPLO_WALMYR = {
     "cliente_nome": "Walmyr",
     "reserva_ref": "3259112",
@@ -460,6 +562,7 @@ EXEMPLO_WALMYR = {
     "num_viajantes": 6,
     "paises": "Portugal + Espanha",
     "kit_conforto": True,
+    "layout": "fjord",
     "cama_cabine": True,
     "beliches": True,
     "sala_grande": True,
@@ -478,7 +581,32 @@ EXEMPLO_WALMYR = {
     ],
 }
 
+# Dados de exemplo — reserva Krafie (validação do layout krafie).
+EXEMPLO_KRAFIE = {
+    "cliente_nome": "Exemplo Krafie",
+    "reserva_ref": "3500000",
+    "viatura": "52-US-19",
+    "pickup": "10/07/2026 às 10:00",
+    "dropoff": "17/07/2026 às 18:00",
+    "num_viajantes": 4,
+    "paises": "Portugal",
+    "kit_conforto": True,
+    "layout": "krafie",
+    "cama_cima_eletrica": True,
+    "cama_convertivel_sala": True,
+    "microondas": True,
+    "maquina_cafe": True,
+    "mesa_exterior": True,
+    "num_cadeiras": 4,
+    "num_bancos": 0,
+    "via_verde": True,
+    "cadeira_auto": False,
+    "notas": ["Família com 2 adultos + 2 crianças — confirmar idades."],
+}
+
 
 if __name__ == "__main__":
-    out = save_checklist_pdf(EXEMPLO_WALMYR, "checklist_exemplo.pdf")
-    print(f"PDF de exemplo gerado: {out}")
+    out = save_checklist_pdf(EXEMPLO_WALMYR, "checklist_exemplo_walmyr.pdf")
+    print(f"PDF Fjord (Walmyr) gerado: {out}")
+    out = save_checklist_pdf(EXEMPLO_KRAFIE, "checklist_exemplo_krafie.pdf")
+    print(f"PDF Krafie gerado: {out}")

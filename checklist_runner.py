@@ -13,14 +13,17 @@ Fluxo (corre no cron, a seguir ao sync):
 
 Não envia email — só guarda no Drive (roadmap D2.4).
 
-Mapeamento calibrado contra o formulário real (zx2ORZ) em 21/05/2026:
-os títulos das perguntas e os formatos das respostas foram confirmados
-contra submissões reais da API do Tally.
+Mapeamento calibrado contra os formulários reais (zx2ORZ Fjord PT em
+21/05/2026, 5BMYL6 Krafie PT em 03/06/2026). Cada form_id é mapeado para um
+"layout" no FORM_LAYOUTS — o layout determina que keywords usar para as
+camas e qual configuração de roupa de cama o checklist_generator desenha.
 
 Env vars:
   TALLY_API_KEY              (obrigatória — gerar em tally.so → Settings → API)
-  TALLY_FORM_ID_PT           (default: "zx2ORZ")
-  TALLY_FORM_ID_EN           (default: "BzAOr5")
+  TALLY_FORM_ID_PT           (default: "zx2ORZ"  — Fjord/Runa/Celta PT)
+  TALLY_FORM_ID_EN           (default: "BzAOr5"  — Fjord/Runa/Celta EN)
+  TALLY_FORM_ID_KRAFIE_PT    (default: "5BMYL6" — Krafie PT)
+  TALLY_FORM_ID_KRAFIE_EN    (default: "LZkQx2" — Krafie EN)
   CHECKLISTS_WORKSHEET       (default: "Checklists")
   CHECKLISTS_MAX_PER_RUN     (default: "15")
   GOOGLE_CREDENTIALS_JSON / GOOGLE_SHEET_NAME / WORKSHEET_NAME (do sync)
@@ -55,8 +58,20 @@ TALLY_API_KEY = os.getenv("TALLY_API_KEY", "").strip()
 TALLY_FORM_IDS = [
     os.getenv("TALLY_FORM_ID_PT", "zx2ORZ").strip(),
     os.getenv("TALLY_FORM_ID_EN", "BzAOr5").strip(),
+    os.getenv("TALLY_FORM_ID_KRAFIE_PT", "5BMYL6").strip(),
+    os.getenv("TALLY_FORM_ID_KRAFIE_EN", "LZkQx2").strip(),
 ]
 TALLY_API_BASE = "https://api.tally.so"
+
+# form_id → layout do checklist_generator. Mantém os layouts da viatura
+# desacoplados dos IDs específicos: novos formulários (PT/EN) por viatura
+# adicionam-se aqui sem mexer em mais nada.
+FORM_LAYOUTS = {
+    "zx2ORZ": "fjord",   # Fjord / Runa / Celta PT
+    "BzAOr5": "fjord",   # Fjord / Runa / Celta EN
+    "5BMYL6": "krafie",  # Krafie PT
+    "LZkQx2": "krafie",  # Krafie EN
+}
 
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Reservas")
@@ -71,10 +86,17 @@ ESTADOS_TERMINAIS = {"gerado"}  # sem_reserva/falhou são reprocessados
 # Palavras-chave para casar o título de cada pergunta Tally com o campo interno.
 # ⚠️ Confirmar contra uma submissão real — ver checklist_template_design.md.
 KW_KIT_CONFORTO = ("roupa de cama", "kit conforto")
+# Fjord / Runa / Celta beds
 KW_CAMA_CABINE = ("cabine", "capucine")
 KW_BELICHES = ("beliche",)
 KW_SALA_GRANDE = ("sala grande",)
 KW_SALA_PEQUENA = ("sala pequena",)
+# Krafie beds (formulário 5BMYL6 / LZkQx2)
+KW_CAMA_CIMA_ELETRICA = ("cama de cima", "elétrica", "eletrica", "upper bed", "electric")
+KW_CAMA_CONVERTIVEL_SALA = (
+    "convertível da sala", "convertivel da sala", "convertible living",
+    "convertível sala", "convertivel sala",
+)
 KW_MICROONDAS = ("micro-onda", "microonda", "micro onda")
 KW_MAQUINA_CAFE = ("máquina de café", "maquina de cafe", "café")
 KW_MESA_EXTERIOR = ("mesa exterior", "mesa")
@@ -128,11 +150,12 @@ def sala_grande_extensores(resposta: str) -> int:
     return 1
 
 
-def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
+def tally_to_checklist_data(answers: dict, booking: dict, layout: str = "fjord") -> dict:
     """Cruza a resposta Tally com a reserva e devolve o dict para o gerador.
 
     `answers`: {titulo_pergunta_normalizado: resposta}.
     `booking`: linha da folha Reservas (dict).
+    `layout`: "fjord" (default) ou "krafie" — determina que camas/keywords usar.
     """
     veiculo = str(booking.get("Veículo", "") or "").strip()
     matricula = str(booking.get("Matrícula", "") or "").strip()
@@ -143,11 +166,10 @@ def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
     data_out = str(booking.get("Data Fim", "") or "").strip()
     hora_out = str(booking.get("Hora Fim", "") or "").strip()
 
-    resp_sala_grande = answer_for(answers, KW_SALA_GRANDE)
     resp_kit = answer_for(answers, KW_KIT_CONFORTO)
     pedidos = answer_for(answers, KW_PEDIDOS)
 
-    return {
+    data = {
         "cliente_nome": full_guest_name(booking),
         "reserva_ref": str(booking.get("ID", "") or "").strip(),
         "viatura": viatura,
@@ -155,13 +177,9 @@ def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
         "dropoff": f"{data_out} às {hora_out}".strip(" às"),
         "num_viajantes": booking.get("Viajantes", ""),
         "paises": str(booking.get("Países Permitidos", "") or "").strip(),
-        # Camas / kit conforto
+        # Kit conforto + layout
         "kit_conforto": _is_sim(resp_kit),
-        "cama_cabine": _is_sim(answer_for(answers, KW_CAMA_CABINE)),
-        "beliches": _is_sim(answer_for(answers, KW_BELICHES)),
-        "sala_grande": _is_sim(resp_sala_grande),
-        "sala_grande_extensores": sala_grande_extensores(resp_sala_grande),
-        "sala_pequena": _is_sim(answer_for(answers, KW_SALA_PEQUENA)),
+        "layout": layout,
         # Cozinha
         "microondas": _is_sim(answer_for(answers, KW_MICROONDAS)),
         "maquina_cafe": _is_sim(answer_for(answers, KW_MAQUINA_CAFE)),
@@ -175,6 +193,24 @@ def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
         # Notas
         "notas": [pedidos] if pedidos else [],
     }
+
+    # Camas — depende do layout da viatura.
+    if layout == "krafie":
+        data.update({
+            "cama_cima_eletrica": _is_sim(answer_for(answers, KW_CAMA_CIMA_ELETRICA)),
+            "cama_convertivel_sala": _is_sim(answer_for(answers, KW_CAMA_CONVERTIVEL_SALA)),
+        })
+    else:
+        resp_sala_grande = answer_for(answers, KW_SALA_GRANDE)
+        data.update({
+            "cama_cabine": _is_sim(answer_for(answers, KW_CAMA_CABINE)),
+            "beliches": _is_sim(answer_for(answers, KW_BELICHES)),
+            "sala_grande": _is_sim(resp_sala_grande),
+            "sala_grande_extensores": sala_grande_extensores(resp_sala_grande),
+            "sala_pequena": _is_sim(answer_for(answers, KW_SALA_PEQUENA)),
+        })
+
+    return data
 
 
 # --- Tally API ------------------------------------------------------------
@@ -219,6 +255,7 @@ def fetch_submissions(form_id: str) -> list:
                 continue
             out.append({
                 "id": str(sub.get("id", "")),
+                "form_id": form_id,
                 "answers": _extract_answers(sub, questions),
             })
         if not payload.get("hasMore"):
@@ -376,7 +413,8 @@ def run() -> dict:
             continue
 
         try:
-            data = tally_to_checklist_data(answers, booking)
+            layout = FORM_LAYOUTS.get(sub.get("form_id", ""), "fjord")
+            data = tally_to_checklist_data(answers, booking, layout=layout)
             pdf = generate_checklist_pdf(data)
             nome = full_guest_name(booking)
             folder_id = resolve_booking_folder(
