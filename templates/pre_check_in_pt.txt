@@ -1,3 +1,6 @@
+🇬🇧 English version below ↓
+─────────────────────────────────────────────
+
 Olá ${nome},
 
 Seja bem-vindo à Haven Nordis. É com muito gosto que recebemos a confirmação da sua reserva na plataforma Yescapa.
@@ -19,14 +22,14 @@ Seguro: ${seguro}
 
 Para o recebermos com o cuidado que merece, precisamos de algumas respostas suas. São elas que nos permitem afinar cada detalhe — desde a configuração das camas aos kits que deixamos preparados — antes da sua chegada.
 
-→ Preencher o pré-check-in: ${link_formulario}
+→ Preencher o pré-check-in: ${link_formulario_pt}
 
 
 — Guia de funcionamento
 
 Preparámos um pequeno vídeo de boas-vindas que mostra a autocaravana por dentro, o que está incluído e como tudo funciona, para que a sua chegada ao check-in seja tranquila e a aventura comece sem percalços.
 
-▶ https://youtu.be/wD4Etsebtwo
+▶ $link_guia_pt
 
 Recomendamos vê-lo com calma, idealmente com quem vai viajar consigo.
 
@@ -55,4 +58,69 @@ Qualquer questão antes da chegada, basta responder a este email — temos todo 
 
 Até breve,
 Equipa Haven Nordis
+ops@havennordis.com
+
+
+═════════════════════════════════════════════
+ENGLISH VERSION
+═════════════════════════════════════════════
+
+
+Hello ${nome},
+
+Welcome to Haven Nordis. We're delighted to have your booking confirmed through Yescapa.
+
+
+— Booking details
+
+Reference: #${ref}
+Motorhome: ${viatura}
+Pick-up: ${data_in} from ${hora_in}
+Drop-off: ${data_out} until ${hora_out}
+Number of travellers: ${num_viajantes}
+Countries to visit: ${paises}
+Mileage package: ${kms}
+Insurance: ${seguro}
+
+
+— Pre-check-in: help us prepare the motorhome to your needs
+
+So that we can welcome you with the care you deserve, we need a few details from you. Your answers are what allow us to fine-tune every detail — from the bed layout to the kits we set up — before you arrive.
+
+→ Complete pre-check-in: ${link_formulario_en}
+
+
+— Operating guide
+
+We've put together a short welcome video that walks you through the motorhome, what's included and how everything works, so that your arrival at check-in is smooth and your trip starts without a hitch.
+
+▶ $link_guia_en
+
+We recommend watching it calmly, ideally with the people travelling with you.
+
+
+— Practical details for your arrival
+
+Security deposit. The deposit is €1,000 and can be paid in cash, MB Way or by bank transfer at check-in. The deposit is returned at check-out, provided no damage is recorded. If damage is recorded, the deposit will be retained until we have the repair quote, which we'll handle as quickly as possible.
+Bank transfer details:
+   IBAN: PT50 0033 0000 4582 1967 4500 5
+   BIC/SWIFT: BCOMPTPL
+   Account holder: Haven Nordis, Lda
+
+Documents. On check-in day, please bring your driver's licence and your ID or passport. The rental contract and the insurance certificate will arrive by email through the platform. A printed copy will also be available in the document folder inside the motorhome.
+
+Check-in location. R. Jerónimo Dias 3-4, Costa de Caparica, Portugal.
+Coordinates: 38.648582, -9.232626
+Map: https://maps.app.goo.gl/NhQ6TagfemupLXmu5
+
+Fuel. The motorhome is delivered with a full tank and must be returned in the same condition.
+
+Cleaning. We ask that surfaces and cupboards be free of personal items, rubbish and food — the deep cleaning is on us. The grey water tank and the chemical toilet must be returned emptied (otherwise a charge of €15 applies for emptying the grey water tank and €50 for emptying the chemical toilet).
+
+During your trip. We're available for any question or unexpected situation via +351 964 043 209 (call and WhatsApp).
+
+For anything before arrival, just reply to this email — we'd be glad to help.
+
+See you soon,
+The Haven Nordis Team
 ops@havennordis.com

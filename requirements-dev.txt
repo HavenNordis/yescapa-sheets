@@ -1,0 +1,4 @@
+# Test dependencies — installed only in CI / dev.
+# Production dependencies stay in requirements.txt.
+pytest>=8.0
+pytest-mock>=3.10

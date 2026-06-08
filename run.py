@@ -4,11 +4,21 @@ Ponto de entrada para automação cloud.
 Chamado pelo Railway como cron job com um argumento:
 
     python run.py --email          → verifica email e corre sync se houver reserva nova,
-                                     depois tenta enviar emails de pré-check-in pendentes.
+                                     depois corre a pipeline de pós-sync (emails, contactos,
+                                     notificações WhatsApp).
     python run.py --scheduled      → corre sync incondicionalmente (agendamento diário),
-                                     depois tenta enviar emails de pré-check-in pendentes.
+                                     depois corre a pipeline de pós-sync.
     python run.py --pre-check-in   → corre APENAS o envio de emails pré-check-in
                                      (sem tocar no sync; útil para testes manuais).
+    python run.py --contacts       → corre APENAS a sync de Google Contacts.
+    python run.py --whatsapp       → corre APENAS a notificação WhatsApp interna.
+
+Ordem da pipeline pós-sync:
+    1. pre_check_in_sender (email ao hóspede)
+    2. google_contacts_sync (cria/atualiza contacto na conta ops@)
+    3. whatsapp_notification (espera +2h após email; manda alerta interno para ops@)
+
+Cada peça é independente e falha em silêncio (logs + estado na sheet).
 """
 
 import sys
@@ -45,7 +55,43 @@ def run_pre_check_in():
         log(f"Pré-check-in concluído: {result}")
     except Exception as e:
         log(f"Erro no pré-check-in: {e}")
-        # NÃO relançar — falha no envio não deve abortar o cron job.
+
+
+def run_contacts_sync():
+    """Sincroniza Google Contacts: cria/atualiza contacto para cada reserva confirmed.
+
+    Independente do email — falha em silêncio (logs + estado em worksheet Contactos).
+    """
+    log("A iniciar sync Google Contacts...")
+    try:
+        from google_contacts_sync import main as sync_contacts
+        result = sync_contacts()
+        log(f"Contactos concluído: {result}")
+    except Exception as e:
+        log(f"Erro na sync de contactos: {e}")
+
+
+def run_whatsapp_notification():
+    """Envia notificação interna por email para ops@ com botão wa.me, para reservas
+    cujo email pré-check-in já saiu há >= DELAY_APOS_EMAIL_MINUTES (default 120).
+
+    Falha em silêncio (logs + estado em worksheet WhatsApp).
+    """
+    log("A iniciar notificação WhatsApp interna...")
+    try:
+        from whatsapp_notification import main as notify_whatsapp
+        result = notify_whatsapp()
+        log(f"WhatsApp notification concluído: {result}")
+    except Exception as e:
+        log(f"Erro na notificação WhatsApp: {e}")
+
+
+def run_post_sync_pipeline():
+    """Pipeline pós-sync: email → contactos → notificação WhatsApp.
+    Cada peça é independente e regista o seu estado em worksheet própria."""
+    run_pre_check_in()
+    run_contacts_sync()
+    run_whatsapp_notification()
 
 
 def main():
@@ -59,22 +105,30 @@ def main():
             mark_booking_emails_read()
         else:
             log("Sem emails novos do Yescapa.")
-        # Em ambos os casos (com ou sem sync) tentamos enviar pré-check-in pendentes,
-        # para garantir que reservas que ficaram em backlog (por falha anterior) saem.
-        run_pre_check_in()
+        # Em ambos os casos corremos a pipeline pós-sync, para que reservas
+        # em backlog (por falha anterior) saiam.
+        run_post_sync_pipeline()
 
     elif mode == "--scheduled":
         log("Modo: agendamento")
         run_sync("scheduled")
-        run_pre_check_in()
+        run_post_sync_pipeline()
 
     elif mode == "--pre-check-in":
         log("Modo: enviar pré-check-in apenas (sem sync)")
         run_pre_check_in()
 
+    elif mode == "--contacts":
+        log("Modo: sync Google Contacts apenas")
+        run_contacts_sync()
+
+    elif mode == "--whatsapp":
+        log("Modo: notificação WhatsApp apenas")
+        run_whatsapp_notification()
+
     else:
         log(f"Argumento desconhecido: {mode}")
-        log("Uso: python run.py --email | --scheduled | --pre-check-in")
+        log("Uso: python run.py --email | --scheduled | --pre-check-in | --contacts | --whatsapp")
         sys.exit(1)
 
 
