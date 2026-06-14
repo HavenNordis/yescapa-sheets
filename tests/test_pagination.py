@@ -37,21 +37,16 @@ def make_page_mock(api_responses, api_count):
 
 
 def test_pagination_confirmed_three_pages():
-    """23 reservas confirmed espalhadas por 3 paginas (10/10/3) — apanhar todas.
-
-    Cenario: a SPA da Yescapa pre-fetcha 2 paginas (20 bookings) no carregamento
-    da p1. O nosso codigo deve detectar que faltam 3 e fazer fetch da p3.
-    """
+    """23 reservas confirmed espalhadas por 3 paginas (10/10/3) — apanhar todas."""
     from yescapa_sheets import YescapaPlaywright
 
     yp = YescapaPlaywright()
     yp._intercepted = {}
     yp._api_counts = {"confirmed": 23}
-    # SPA da Yescapa devolveu URL com page=1 e page_size=10 — registado em _api_next
     yp._api_next = {"confirmed": "https://api.example.com/v4/bookings-owner/?meta_state=confirmed&page=1&page_size=10"}
     yp._api_headers = {"Authorization": "Bearer fake"}
 
-    # Simular que a SPA ja carregou as 2 primeiras paginas (20 bookings)
+    # SPA da Yescapa pre-fetch das primeiras 2 paginas (20 bookings) no carregamento da p1
     for i in range(1, 21):
         yp._intercepted[i] = {"id": i, "meta_state": "confirmed", "state": "PAID"}
 
@@ -63,12 +58,10 @@ def test_pagination_confirmed_three_pages():
         3: [{"id": i, "meta_state": "confirmed", "state": "PAID"} for i in range(21, 24)],
     }
     page = make_page_mock(api_responses, api_count=23)
-
     yp._collect_state(page, "confirmed", None)
 
     confirmed = [b for b in yp._intercepted.values() if b["meta_state"] == "confirmed"]
-    assert len(confirmed) == 23, f"Esperava 23 reservas confirmed, obtive {len(confirmed)}"
-    # Confirma que o ID 23 (era o que faltava — Marcel-like) foi apanhado
+    assert len(confirmed) == 23, f"Esperava 23, obtive {len(confirmed)}"
     assert 23 in yp._intercepted, "Reserva da p3 nao foi capturada"
 
 
@@ -88,7 +81,6 @@ def test_pagination_one_page_does_not_loop():
     page = make_page_mock({}, api_count=5)
     yp._collect_state(page, "confirmed", None)
 
-    # request.get nao deve ter sido chamado porque ja temos 5/5
     page.request.get.assert_not_called()
     assert len([b for b in yp._intercepted.values() if b["meta_state"] == "confirmed"]) == 5
 
@@ -120,7 +112,6 @@ def test_pagination_archived_with_state_three_pages():
     yp._api_next = {"archived/CANCELLED_GUEST": "https://api.example.com/v4/bookings-owner/?meta_state=archived&state=CANCELLED_GUEST&page=1&page_size=10"}
     yp._api_headers = {}
 
-    # SPA carregou 10 na p1 (carregamento inicial)
     for i in range(100, 110):
         yp._intercepted[i] = {"id": i, "meta_state": "archived", "state": "CANCELLED_GUEST"}
 
@@ -139,7 +130,7 @@ def test_pagination_archived_with_state_three_pages():
 
 
 def test_pagination_http_error_stops_gracefully():
-    """Se a API devolver HTTP 500 numa pagina intermedia, parar sem rebentar."""
+    """HTTP 500 numa pagina intermedia: parar sem rebentar."""
     from yescapa_sheets import YescapaPlaywright
 
     yp = YescapaPlaywright()
@@ -162,7 +153,5 @@ def test_pagination_http_error_stops_gracefully():
     resp.text.return_value = "Internal Server Error"
     page.request.get.return_value = resp
 
-    # Nao deve levantar excepcao
     yp._collect_state(page, "confirmed", None)
-    # Sai com as 10 que ja tinha — nao adiciona mais
     assert len(yp._intercepted) == 10

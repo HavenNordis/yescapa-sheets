@@ -30,6 +30,9 @@ import json
 import os
 import urllib.parse
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LISBON_TZ = ZoneInfo("Europe/Lisbon")
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
@@ -98,7 +101,7 @@ def log(msg: str):
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H:%M:%S")
+    return datetime.now(LISBON_TZ).strftime("%Y-%m-%d_%H:%M:%S")
 
 
 # --- Google Sheets (service account, partilha do yescapa_sheets.py) ---
@@ -192,8 +195,6 @@ def reservas_to_booking(row: dict) -> dict:
     veiculo = str(row.get("Veículo", "")).strip()
     matricula = str(row.get("Matrícula", "")).strip()
     viatura = f"{veiculo} ({matricula})".strip() if matricula else veiculo
-    # NOTA: 'matricula' é exportado no dict booking para o render_email() poder
-    # fazer lookup do guia (links_config.todas_as_variaveis_guia).
 
     kms_inc = str(row.get("KM Incluídos", "")).strip()
     kms_opc = str(row.get("Opção KM", "")).strip()
@@ -292,8 +293,8 @@ def render_email(language: str, booking: dict) -> tuple[str, str, str]:
         # Mantido por compatibilidade (caso o template antigo ainda use).
         "link_formulario": build_form_link(booking, "pt"),
     }
-    # Injetar variáveis do Guia de Funcionamento (link_guia, link_guia_curto,
-    # link_guia_thumb) com lookup pela matrícula da reserva (links_config.py).
+    # Injetar variáveis do Guia de Funcionamento (link_guia_pt/_en + thumb + curto)
+    # com lookup pela matrícula da reserva (links_config.py).
     ctx.update(todas_as_variaveis_guia(booking.get("matricula", "")))
     subject = Template(subject_tpl).safe_substitute(ctx)
     body = Template(body_tpl).safe_substitute(ctx)
@@ -480,7 +481,6 @@ def run():
             )
             log(f"  ✓ #{bid}: enviado a {booking['email']} ({idioma})")
             enviados += 1
-
         except Exception as e:
             tipo = type(e).__name__
             upsert_state(

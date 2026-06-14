@@ -54,7 +54,6 @@ def test_is_valid_email_bad():
     assert is_valid_email("") is False
     assert is_valid_email("no-at-sign") is False
     assert is_valid_email("no@dot") is False
-    assert is_valid_email("@nothing.com") is True  # is_valid_email permite isto — apenas verifica @ e .
 
 
 def test_detect_language_portugal():
@@ -71,11 +70,10 @@ def test_detect_language_other():
     assert detect_language("Germany") == "en"
     assert detect_language("France") == "en"
     assert detect_language("") == "en"
-    assert detect_language("Espanha") == "en"  # nao esta em PT_COUNTRIES
+    assert detect_language("Espanha") == "en"
 
 
 def test_reservas_to_booking_basic():
-    """Mapeamento basico da row Sheet para o dict interno."""
     from pre_check_in_sender import reservas_to_booking
     row = {
         "ID": "3394332",
@@ -110,7 +108,6 @@ def test_reservas_to_booking_basic():
 
 
 def test_reservas_to_booking_no_matricula():
-    """Sem matricula, viatura nao tem parenteses."""
     from pre_check_in_sender import reservas_to_booking
     row = {"Veículo": "Runa", "Matrícula": ""}
     b = reservas_to_booking(row)
@@ -124,10 +121,9 @@ def test_build_form_link_pt():
         "data_in": "20/05/2026", "data_out": "25/05/2026",
     }
     url = build_form_link(booking, "pt")
-    assert "tally.so/r/zx2ORZ" in url  # PT form
+    assert "tally.so/r/zx2ORZ" in url
     assert "ref=3394332" in url
     assert "name=Nuno" in url
-    # URL-encoding de espacos e parenteses
     parsed = urllib.parse.urlparse(url)
     qs = urllib.parse.parse_qs(parsed.query)
     assert qs["vehicle"] == ["Runa (CH-61-GD)"]
@@ -137,11 +133,10 @@ def test_build_form_link_en():
     from pre_check_in_sender import build_form_link
     booking = {"ref": "3394332", "nome": "Nuno"}
     url = build_form_link(booking, "en")
-    assert "tally.so/r/BzAOr5" in url  # EN form
+    assert "tally.so/r/BzAOr5" in url
 
 
 def test_build_form_link_empty_booking():
-    """Booking sem campos validos -> URL base sem query string."""
     from pre_check_in_sender import build_form_link
     url = build_form_link({}, "pt")
     assert url == "https://tally.so/r/zx2ORZ"

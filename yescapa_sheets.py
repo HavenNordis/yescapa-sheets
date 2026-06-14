@@ -18,6 +18,9 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LISBON_TZ = ZoneInfo("Europe/Lisbon")
 
 import gspread
 from dotenv import load_dotenv
@@ -436,11 +439,23 @@ class SheetsClient:
             ws.format("A1:C1", {"textFormat": {"bold": True}})
             print(f"Separador '{log_sheet_name}' criado.")
 
-        now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
+        now = datetime.now(LISBON_TZ).strftime("%d/%m/%Y %H:%M:%S")
         motivo = "Email (nova reserva)" if trigger == "email" else "Agendamento"
-        cell = ws.find(motivo, in_column=2)
-        if cell:
-            ws.update(f"A{cell.row}:C{cell.row}", [[now, motivo, n_bookings]])
+
+        # Procurar TODAS as linhas com este motivo (e não só a primeira),
+        # para apagar duplicados que possam ter ficado de versões anteriores.
+        col_b = ws.col_values(2)  # inclui o cabeçalho
+        matching = [
+            i + 1 for i, v in enumerate(col_b)
+            if i > 0 and (v or "").strip() == motivo
+        ]
+        if matching:
+            first = matching[0]
+            ws.update(f"A{first}:C{first}", [[now, motivo, n_bookings]])
+            for row_num in sorted(matching[1:], reverse=True):
+                ws.delete_rows(row_num)
+            if len(matching) > 1:
+                print(f"Log: apagados {len(matching) - 1} duplicados de '{motivo}'.")
         else:
             ws.append_row([now, motivo, n_bookings])
         print(f"Log actualizado: {now} | {motivo} | {n_bookings} reservas")

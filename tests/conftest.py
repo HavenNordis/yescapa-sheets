@@ -1,4 +1,4 @@
-"""Configuracao partilhada dos testes — fixtures e env vars dummy."""
+"""Configuracao partilhada dos testes - fixtures e env vars dummy."""
 import os
 import sys
 from pathlib import Path

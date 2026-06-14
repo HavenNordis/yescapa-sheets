@@ -4,21 +4,24 @@ Ponto de entrada para automação cloud.
 Chamado pelo Railway como cron job com um argumento:
 
     python run.py --email          → verifica email e corre sync se houver reserva nova,
-                                     depois corre a pipeline de pós-sync (emails, contactos,
-                                     notificações WhatsApp).
-    python run.py --scheduled      → corre sync incondicionalmente (agendamento diário),
-                                     depois corre a pipeline de pós-sync.
-    python run.py --pre-check-in   → corre APENAS o envio de emails pré-check-in
-                                     (sem tocar no sync; útil para testes manuais).
+                                     depois pipeline pós-sync (pré-check-in + drive
+                                     archive + checklists + contactos + WhatsApp).
+    python run.py --scheduled      → corre sync incondicionalmente (agendamento),
+                                     depois pipeline pós-sync.
+    python run.py --pre-check-in   → corre APENAS o envio de emails pré-check-in.
+    python run.py --drive-archive  → corre APENAS o arquivo de documentos no Drive.
+    python run.py --checklist      → corre APENAS a geração de checklists do Tally.
     python run.py --contacts       → corre APENAS a sync de Google Contacts.
     python run.py --whatsapp       → corre APENAS a notificação WhatsApp interna.
 
 Ordem da pipeline pós-sync:
     1. pre_check_in_sender (email ao hóspede)
-    2. google_contacts_sync (cria/atualiza contacto na conta ops@)
-    3. whatsapp_notification (espera +2h após email; manda alerta interno para ops@)
+    2. drive_archiver (arquivo de docs no Drive)
+    3. checklist_runner (geração de checklists)
+    4. google_contacts_sync (cria/atualiza contacto na conta ops@)
+    5. whatsapp_notification (espera +2h após email; manda alerta interno para ops@)
 
-Cada peça é independente e falha em silêncio (logs + estado na sheet).
+Cada peça é independente e falha em silêncio (logs + estado em worksheet própria).
 """
 
 import sys
@@ -55,6 +58,39 @@ def run_pre_check_in():
         log(f"Pré-check-in concluído: {result}")
     except Exception as e:
         log(f"Erro no pré-check-in: {e}")
+        # NÃO relançar — falha no envio não deve abortar o cron job.
+
+
+def run_drive_archive():
+    """Arquiva no Google Drive os documentos das reservas (contrato, fatura).
+
+    Falhas aqui não interrompem o cron — os erros ficam registados na folha
+    Documentos para revisão manual.
+    """
+    log("A iniciar arquivo de documentos no Drive...")
+    try:
+        from drive_archiver import main as archive_docs
+        result = archive_docs()
+        log(f"Arquivo de documentos concluído: {result}")
+    except Exception as e:
+        log(f"Erro no arquivo de documentos: {e}")
+        # NÃO relançar — falha no arquivo não deve abortar o cron job.
+
+
+def run_checklist():
+    """Gera as checklists de preparação a partir das respostas do Tally.
+
+    Falhas aqui não interrompem o cron — os erros ficam registados na folha
+    Checklists para revisão manual.
+    """
+    log("A iniciar geração de checklists...")
+    try:
+        from checklist_runner import main as gerar_checklists
+        result = gerar_checklists()
+        log(f"Checklists concluído: {result}")
+    except Exception as e:
+        log(f"Erro na geração de checklists: {e}")
+        # NÃO relançar — falha aqui não deve abortar o cron job.
 
 
 def run_contacts_sync():
@@ -69,6 +105,7 @@ def run_contacts_sync():
         log(f"Contactos concluído: {result}")
     except Exception as e:
         log(f"Erro na sync de contactos: {e}")
+        # NÃO relançar — falha aqui não deve abortar o cron job.
 
 
 def run_whatsapp_notification():
@@ -84,12 +121,15 @@ def run_whatsapp_notification():
         log(f"WhatsApp notification concluído: {result}")
     except Exception as e:
         log(f"Erro na notificação WhatsApp: {e}")
+        # NÃO relançar — falha aqui não deve abortar o cron job.
 
 
 def run_post_sync_pipeline():
-    """Pipeline pós-sync: email → contactos → notificação WhatsApp.
-    Cada peça é independente e regista o seu estado em worksheet própria."""
+    """Pipeline pós-sync: email → docs → checklist → contactos → WhatsApp.
+    Cada peça é independente e falha em silêncio."""
     run_pre_check_in()
+    run_drive_archive()
+    run_checklist()
     run_contacts_sync()
     run_whatsapp_notification()
 
@@ -98,15 +138,17 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--scheduled"
 
     if mode == "--email":
-        log("Modo: verificação de email")
+        log("Modo: cron + verificação de email")
         from email_checker import has_new_booking_email, mark_booking_emails_read
-        if has_new_booking_email():
-            run_sync("email")
-            mark_booking_emails_read()
+        new_email = has_new_booking_email()
+        if new_email:
+            log("Email novo de reserva detectado.")
         else:
-            log("Sem emails novos do Yescapa.")
-        # Em ambos os casos corremos a pipeline pós-sync, para que reservas
-        # em backlog (por falha anterior) saiam.
+            log("Sem emails novos do Yescapa — sync na mesma (cron).")
+        # Sync sempre — mantém a folha em dia com o Yescapa em cada run.
+        run_sync("email" if new_email else "scheduled")
+        if new_email:
+            mark_booking_emails_read()
         run_post_sync_pipeline()
 
     elif mode == "--scheduled":
@@ -118,17 +160,26 @@ def main():
         log("Modo: enviar pré-check-in apenas (sem sync)")
         run_pre_check_in()
 
+    elif mode == "--drive-archive":
+        log("Modo: arquivo de documentos apenas (sem sync)")
+        run_drive_archive()
+
+    elif mode == "--checklist":
+        log("Modo: geração de checklists apenas (sem sync)")
+        run_checklist()
+
     elif mode == "--contacts":
-        log("Modo: sync Google Contacts apenas")
+        log("Modo: sync Google Contacts apenas (sem sync)")
         run_contacts_sync()
 
     elif mode == "--whatsapp":
-        log("Modo: notificação WhatsApp apenas")
+        log("Modo: notificação WhatsApp apenas (sem sync)")
         run_whatsapp_notification()
 
     else:
         log(f"Argumento desconhecido: {mode}")
-        log("Uso: python run.py --email | --scheduled | --pre-check-in | --contacts | --whatsapp")
+        log("Uso: python run.py --email | --scheduled | --pre-check-in | "
+            "--drive-archive | --checklist | --contacts | --whatsapp")
         sys.exit(1)
 
 
