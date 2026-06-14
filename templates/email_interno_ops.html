@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatsApp pronto · #$ref</title>
+</head>
+<body style="margin:0; padding:0; background:#F5F2EC; font-family: Helvetica, Arial, sans-serif; color:#333333;">
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5F2EC; padding:32px 0;">
+  <tr>
+    <td align="center">
+
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background:#FFFFFF; border:1px solid #E5E2DC; border-radius:6px;">
+
+        <!-- Cabeçalho -->
+        <tr>
+          <td style="background:#03232D; padding:28px 32px; border-radius:6px 6px 0 0; text-align:center;">
+            <div style="color:#CDB9A3; font-size:11px; font-weight:600; letter-spacing:2.5px; text-transform:uppercase; margin-bottom:8px;">
+              Notificação interna
+            </div>
+            <div style="color:#FFFFFF; font-size:24px; font-weight:300; letter-spacing:1px;">
+              Haven Nordis
+            </div>
+          </td>
+        </tr>
+
+        <!-- Título principal -->
+        <tr>
+          <td style="padding:36px 32px 8px 32px; text-align:center;">
+            <div style="color:#B09D83; font-size:11px; font-weight:600; letter-spacing:2.5px; text-transform:uppercase; margin-bottom:12px;">
+              Novo hóspede
+            </div>
+            <div style="color:#03232D; font-size:26px; font-weight:300; line-height:1.3;">
+              Mensagem WhatsApp pronta a enviar
+            </div>
+            <div style="width:48px; height:1px; background:#CDB9A3; margin:18px auto 0 auto;"></div>
+          </td>
+        </tr>
+
+        <!-- Resumo da reserva -->
+        <tr>
+          <td style="padding:24px 32px 8px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F4F1EC; border:1px solid #E5E2DC; border-radius:6px;">
+              <tr>
+                <td style="padding:20px 24px; font-size:14px; line-height:1.7; color:#03232D;">
+                  <strong style="color:#03232D;">$nome $apelido</strong><br>
+                  <span style="color:#5A6B70;">$viatura</span><br>
+                  <span style="color:#5A6B70;">Check-in $data_in $hora_in &nbsp;·&nbsp; Check-out $data_out $hora_out</span><br>
+                  <span style="color:#5A6B70;">Telefone $telefone &nbsp;·&nbsp; $email</span><br>
+                  <span style="color:#5A6B70;">Idioma detetado: <strong>$idioma</strong> &nbsp;·&nbsp; Ref. #$ref</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Mensagem -->
+        <tr>
+          <td style="padding:24px 32px 8px 32px;">
+            <div style="color:#B09D83; font-size:11px; font-weight:600; letter-spacing:2.5px; text-transform:uppercase; margin-bottom:10px;">
+              Pré-visualização da mensagem
+            </div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#FFFFFF; border:1px solid #E5E2DC; border-radius:6px;">
+              <tr>
+                <td style="padding:20px 24px; font-size:14px; line-height:1.65; color:#333333; white-space:pre-wrap;">$mensagem_preview</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Botão WhatsApp -->
+        <tr>
+          <td style="padding:32px 32px 12px 32px; text-align:center;">
+            <a href="$wa_link"
+               style="display:inline-block; background:#03232D; color:#FFFFFF; text-decoration:none; padding:16px 36px; border-radius:4px; font-size:13px; font-weight:500; letter-spacing:1.5px; text-transform:uppercase;">
+              Abrir WhatsApp com a mensagem
+            </a>
+            <div style="margin-top:14px; font-size:12px; color:#5A6B70;">
+              No telemóvel abre a app · No computador abre o WhatsApp Web
+            </div>
+          </td>
+        </tr>
+
+        <!-- Estado / rodapé técnico -->
+        <tr>
+          <td style="padding:24px 32px 32px 32px; border-top:1px solid #E5E2DC;">
+            <div style="font-size:12px; line-height:1.7; color:#5A6B70;">
+              <strong style="color:#03232D;">Estado:</strong> email de pré-check-in enviado a $email em $email_enviado_em.<br>
+              <strong style="color:#03232D;">Contacto Google:</strong> $contacto_estado.
+            </div>
+          </td>
+        </tr>
+
+      </table>
+
+      <div style="font-size:11px; color:#9FB0B5; padding:18px 0; text-align:center;">
+        Esta mensagem foi gerada automaticamente pelo cron yescapa-sheets.
+      </div>
+
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>
