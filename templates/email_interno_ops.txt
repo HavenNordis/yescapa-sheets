@@ -1,0 +1,28 @@
+Haven Nordis · Notificação interna
+===================================
+
+Nova reserva pronta para WhatsApp.
+
+  Hóspede:        $nome $apelido
+  Telefone:       $telefone
+  Email:          $email
+  Autocaravana:   $viatura
+  Check-in:       $data_in $hora_in
+  Check-out:      $data_out $hora_out
+  Idioma detetado: $idioma
+  Referência:     #$ref
+
+-----------------------------------------------------------
+Mensagem a enviar ao hóspede (clica no link para abrir o
+WhatsApp com a mensagem pré-preenchida):
+
+$wa_link
+
+-----------------------------------------------------------
+Pré-visualização da mensagem:
+
+$mensagem_preview
+
+-----------------------------------------------------------
+Estado: email de pré-check-in enviado a $email em $email_enviado_em.
+Contacto Google: $contacto_estado.

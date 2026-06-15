@@ -29,7 +29,7 @@ Para o recebermos com o cuidado que merece, precisamos de algumas respostas suas
 
 Preparámos um pequeno vídeo de boas-vindas que mostra a autocaravana por dentro, o que está incluído e como tudo funciona, para que a sua chegada ao check-in seja tranquila e a aventura comece sem percalços.
 
-▶ https://youtu.be/pEwfTeeLwGc
+▶ $link_guia_pt
 
 Recomendamos vê-lo com calma, idealmente com quem vai viajar consigo.
 
@@ -94,7 +94,7 @@ So that we can welcome you with the care you deserve, we need a few details from
 
 We've put together a short welcome video that walks you through the motorhome, what's included and how everything works, so that your arrival at check-in is smooth and your trip starts without a hitch.
 
-▶ https://youtu.be/pEwfTeeLwGc
+▶ $link_guia_en
 
 We recommend watching it calmly, ideally with the people travelling with you.
 

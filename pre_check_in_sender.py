@@ -45,6 +45,10 @@ from google.oauth2.service_account import Credentials as SACredentials
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 
+# Single source of truth dos links YouTube dos Guias de Funcionamento.
+# Editar APENAS em links_config.py.
+from links_config import todas_as_variaveis_guia
+
 load_dotenv()
 
 # --- Configurações ---
@@ -207,6 +211,7 @@ def reservas_to_booking(row: dict) -> dict:
         "apelido": str(row.get("Hóspede Apelido", "")).strip(),
         "email": str(row.get("Hóspede Email", "")).strip(),
         "viatura": viatura,
+        "matricula": matricula,
         "data_in": str(row.get("Data Início", "")).strip(),
         "hora_in": str(row.get("Hora Início", "")).strip(),
         "data_out": str(row.get("Data Fim", "")).strip(),
@@ -288,6 +293,9 @@ def render_email(language: str, booking: dict) -> tuple[str, str, str]:
         # Mantido por compatibilidade (caso o template antigo ainda use).
         "link_formulario": build_form_link(booking, "pt"),
     }
+    # Injetar variáveis do Guia de Funcionamento (link_guia_pt/_en + thumb + curto)
+    # com lookup pela matrícula da reserva (links_config.py).
+    ctx.update(todas_as_variaveis_guia(booking.get("matricula", "")))
     subject = Template(subject_tpl).safe_substitute(ctx)
     body = Template(body_tpl).safe_substitute(ctx)
     html = Template(html_tpl).safe_substitute(ctx) if html_tpl else ""
@@ -354,7 +362,8 @@ def send_test_email():
     test_booking = {
         "ref": "TEST-9999",
         "nome": "Joana",
-        "viatura": "Bürstner Lyseo Privilège T 690 G (AA-00-AA)",
+        "viatura": "Bürstner Lyseo Privilège T 690 G (CF-68-JJ)",
+        "matricula": "CF-68-JJ",
         "data_in": "20/05/2026",
         "hora_in": "15:00",
         "data_out": "25/05/2026",

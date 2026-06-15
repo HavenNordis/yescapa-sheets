@@ -1,0 +1,37 @@
+Olá $nome,
+
+O meu nome é João Fonseca, da equipa da Haven Nordis. Confirmamos a reserva da $viatura com check-in a $data_in.
+
+Enviámos um email com informação útil. Se ainda não chegou, vale a pena confirmar na pasta de spam.
+
+Para prepararmos a sua viagem com todos os detalhes importantes, agradecemos o preenchimento deste formulário:
+$link_formulario_pt
+
+Partilho também o link para o Guia de Funcionamento da autocaravana:
+$link_guia_pt
+
+Qualquer dúvida, basta responder por aqui.
+
+Até breve,
+Equipa Haven Nordis
+
+━━━━━━━━━━━━━━━━
+
+🇬🇧 English version
+
+Hello $nome,
+
+My name is João Fonseca, from the Haven Nordis team. The booking of $viatura with check-in on $data_in is confirmed.
+
+We've sent an email with useful information. If it hasn't arrived, it's worth checking the spam folder.
+
+So we can prepare the trip with all the important details, please complete this short form:
+$link_formulario_en
+
+I'm also sharing the link to the Operating Guide for the motorhome:
+$link_guia_en
+
+Any questions, just reply here.
+
+See you soon,
+The Haven Nordis Team
