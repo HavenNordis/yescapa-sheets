@@ -64,7 +64,7 @@ CHECKLISTS_WORKSHEET = os.getenv("CHECKLISTS_WORKSHEET", "Checklists")
 CHECKLISTS_MAX_PER_RUN = int(os.getenv("CHECKLISTS_MAX_PER_RUN", "15"))
 
 CHECKLISTS_HEADERS = [
-    "tally_submission_id", "booking_id", "estado", "timestamp", "pdf_drive", "erro",
+    "tally_submission_id", "booking_id", "estado", "timestamp", "pdf_drive", "erro", "via_verde",
 ]
 ESTADOS_TERMINAIS = {"gerado"}  # sem_reserva/falhou são reprocessados
 
@@ -266,12 +266,12 @@ def ensure_checklists_worksheet(spreadsheet):
     try:
         ws = spreadsheet.worksheet(CHECKLISTS_WORKSHEET)
         if ws.row_values(1) != CHECKLISTS_HEADERS:
-            ws.update("A1:F1", [CHECKLISTS_HEADERS])
+            ws.update("A1:G1", [CHECKLISTS_HEADERS])
         return ws
     except gspread.exceptions.WorksheetNotFound:
         log(f"Worksheet '{CHECKLISTS_WORKSHEET}' não existe — a criar.")
-        ws = spreadsheet.add_worksheet(title=CHECKLISTS_WORKSHEET, rows=2000, cols=6)
-        ws.update("A1:F1", [CHECKLISTS_HEADERS])
+        ws = spreadsheet.add_worksheet(title=CHECKLISTS_WORKSHEET, rows=2000, cols=7)
+        ws.update("A1:G1", [CHECKLISTS_HEADERS])
         return ws
 
 
@@ -289,11 +289,11 @@ def load_state(ws) -> dict:
 
 
 def upsert_state(ws, state_map: dict, sid: str, booking_id: str, estado: str,
-                 pdf_drive: str = "", erro: str = ""):
+                 pdf_drive: str = "", erro: str = "", via_verde: str = ""):
     sid = str(sid)
-    row_values = [sid, str(booking_id), estado, now_iso(), pdf_drive, erro]
+    row_values = [sid, str(booking_id), estado, now_iso(), pdf_drive, erro, via_verde]
     if sid in state_map and "_row_index" in state_map[sid]:
-        ws.update(f"A{state_map[sid]['_row_index']}:F{state_map[sid]['_row_index']}", [row_values])
+        ws.update(f"A{state_map[sid]['_row_index']}:G{state_map[sid]['_row_index']}", [row_values])
     else:
         ws.append_row(row_values, value_input_option="USER_ENTERED")
         state_map[sid] = {"_row_index": len(state_map) + 2}
@@ -388,7 +388,9 @@ def run() -> dict:
                 # Substitui um PDF anterior (resposta atualizada) — apaga e recria.
                 drive.files().delete(fileId=existing, supportsAllDrives=True).execute()
             fid = upload_pdf(drive, pdf, filename, folder_id)
-            upsert_state(state_ws, state_map, sid, ref, "gerado", pdf_drive=file_url(fid))
+            vv_str = "Sim" if data.get("via_verde") else "Não"
+            upsert_state(state_ws, state_map, sid, ref, "gerado",
+                         pdf_drive=file_url(fid), via_verde=vv_str)
             log(f"  ✓ submissão {sid} → checklist #{ref} ({nome})")
             gerados += 1
         except Exception as e:
