@@ -124,14 +124,36 @@ def run_whatsapp_notification():
         # NÃO relançar — falha aqui não deve abortar o cron job.
 
 
+def run_vv():
+    """Consulta Via Verde para reservas com checkout recente e grava passagens em Cauções.
+
+    Corre uma vez por dia, à noite (19h30 Lisboa = 18h30 UTC).
+    Falha em silêncio — não interrompe o cron.
+    """
+    from zoneinfo import ZoneInfo
+    now_lisbon = datetime.now(ZoneInfo("Europe/Lisbon"))
+    # Só correr entre 18h30 e 20h00 Lisboa (1.º slot de 15 min das 18h30)
+    if not (18 * 60 + 30 <= now_lisbon.hour * 60 + now_lisbon.minute < 20 * 60):
+        return
+    log("A iniciar consulta Via Verde...")
+    try:
+        from vv_runner import main as check_vv
+        result = check_vv()
+        log(f"Via Verde concluído: {result}")
+    except Exception as e:
+        log(f"Erro na consulta Via Verde: {e}")
+        # NÃO relançar — falha aqui não deve abortar o cron job.
+
+
 def run_post_sync_pipeline():
-    """Pipeline pós-sync: email → docs → checklist → contactos → WhatsApp.
+    """Pipeline pós-sync: email → docs → checklist → contactos → WhatsApp → VV.
     Cada peça é independente e falha em silêncio."""
     run_pre_check_in()
     run_drive_archive()
     run_checklist()
     run_contacts_sync()
     run_whatsapp_notification()
+    run_vv()
 
 
 def main():
@@ -175,6 +197,12 @@ def main():
     elif mode == "--whatsapp":
         log("Modo: notificação WhatsApp apenas (sem sync)")
         run_whatsapp_notification()
+
+    elif mode == "--vv":
+        log("Modo: consulta Via Verde apenas (sem sync)")
+        from vv_runner import main as check_vv
+        result = check_vv()
+        log(f"Via Verde concluído: {result}")
 
     else:
         log(f"Argumento desconhecido: {mode}")
