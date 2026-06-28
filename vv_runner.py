@@ -29,6 +29,8 @@ from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
 
 import gspread
+import requests
+from html.parser import HTMLParser
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
@@ -191,48 +193,80 @@ def _set_angular(page, selector, value):
     )
 
 
+class _HiddenFieldParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.fields = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "input":
+            d = dict(attrs)
+            if d.get("type") == "hidden" and d.get("name"):
+                self.fields[d["name"]] = d.get("value", "")
+
+
 def _login(page):
-    """Preenche o modal de login se estiver visível."""
+    """Faz login via AJAX API do Via Verde e transfere cookies para Playwright."""
+    api_url = (
+        "https://www.viaverde.pt/DesktopModules/UserLogin/Api.ashx"
+        "?returnurl=%2fempresas%2fminha-via-verde%2fextratos-movimentos"
+    )
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    sess = requests.Session()
+    sess.headers.update({
+        "User-Agent": ua,
+        "Referer": "https://www.viaverde.pt/empresas/",
+        "Origin": "https://www.viaverde.pt",
+    })
+
+    # Primeiro: GET à página principal para obter o ASP.NET_SessionId
+    sess.get("https://www.viaverde.pt/empresas/", timeout=30)
+
+    # Login via API AJAX
+    resp = sess.post(api_url, data={
+        "action": "login",
+        "username": VV_EMAIL,
+        "password": VV_PASSWORD,
+        "rememberMe": "true",
+        "lang": "pt-PT",
+        "forceVVS": "false",
+        "savedUrl": "%2fempresas%2fminha-via-verde%2fextratos-movimentos",
+    }, timeout=30)
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"Login API falhou com status {resp.status_code}")
+
     try:
-        email_inp = page.locator("dialog input[type='email']").first
-        if email_inp.is_visible(timeout=4000):
-            email_inp.fill(VV_EMAIL)
-            page.locator("dialog input[type='password']").first.fill(VV_PASSWORD)
-            page.locator("dialog button[type='submit']").first.click()
-            page.wait_for_load_state("networkidle")
-            time.sleep(2)
-            log("  ✓ Login efectuado")
-            return
+        result = resp.json()
+        if not result.get("success") and not result.get("redirectUrl"):
+            raise RuntimeError(f"Login recusado: {result}")
     except Exception:
-        pass
+        pass  # Alguns respostas não são JSON
 
-    # Se o modal não abriu automaticamente, tenta clicar no trigger de login
-    for trigger in [
-        "a:has-text('Aceder')",
-        "button:has-text('Aceder')",
-        "a:has-text('Login')",
-        "button:has-text('Login')",
-    ]:
-        try:
-            page.click(trigger, timeout=2000)
-            time.sleep(1)
-            email_inp = page.locator("dialog input[type='email']").first
-            if email_inp.is_visible(timeout=3000):
-                email_inp.fill(VV_EMAIL)
-                page.locator("dialog input[type='password']").first.fill(VV_PASSWORD)
-                page.locator("dialog button[type='submit']").first.click()
-                page.wait_for_load_state("networkidle")
-                time.sleep(2)
-                log("  ✓ Login efectuado (via trigger)")
-                return
-        except Exception:
-            continue
-
-    raise RuntimeError("Não foi possível encontrar o formulário de login")
+    # Transferir cookies para o contexto Playwright
+    playwright_cookies = []
+    for c in sess.cookies:
+        playwright_cookies.append({
+            "name": c.name,
+            "value": c.value,
+            "domain": "www.viaverde.pt" if not c.domain.startswith(".") else c.domain,
+            "path": c.path or "/",
+        })
+    page.context.add_cookies(playwright_cookies)
+    log(f"  ✓ Login efectuado (AJAX API, {len(playwright_cookies)} cookies)")
 
 
 def _is_logged_in(page):
-    return "logout" in page.content().lower()
+    """Verifica login via URL — mais fiável que procurar 'logout' no HTML."""
+    url = page.url
+    if "returnurl" in url.lower():
+        return False
+    # Na página de empresas autenticada, o URL não tem returnurl e tem minha-via-verde ou menu de conta
+    return "minha-via-verde" in url or "logout" in page.content().lower()
 
 
 def scrape_movements(page, plate, date_from, date_to):
@@ -251,13 +285,21 @@ def scrape_movements(page, plate, date_from, date_to):
         page.goto(VV_URL, wait_until="networkidle")
         time.sleep(2)
 
-    # Activar aba "Movimentos" (o filtro já fica expandido nessa aba)
+    # Activar aba "Movimentos"
     try:
         page.locator("a:has-text('Movimentos')").first.click()
         page.wait_for_load_state("networkidle")
-        time.sleep(1)
+        time.sleep(2)
     except Exception:
         pass
+
+    # Expandir painel de filtros (em headless pode estar fechado)
+    page.evaluate("""
+        const expBtns = Array.from(document.querySelectorAll('button.expand-button.js-toggle'));
+        // Abrir o último (pertence à aba Movimentos)
+        if (expBtns.length > 0) expBtns[expBtns.length - 1].click();
+    """)
+    time.sleep(0.5)
 
     # Filtro: matrícula — input.input com placeholder=" " dentro de div.tags
     try:
@@ -288,14 +330,17 @@ def scrape_movements(page, plate, date_from, date_to):
     )
     time.sleep(0.3)
 
-    # Botão "Filtrar" — clicar via JS para evitar conflito com o botão escondido do Extratos
+    # Botão "Filtrar" — JS click no último (evita conflito com duplicado escondido do Extratos)
     try:
-        page.evaluate("""
+        clicked = page.evaluate("""(() => {
             const btns = Array.from(document.querySelectorAll('button.button'));
-            const btn = btns.find(b => b.textContent.trim() === 'Filtrar' && b.offsetParent !== null);
-            if (btn) btn.click();
-            else throw new Error('Filtrar button not found or not visible');
-        """)
+            const filtrar = btns.filter(b => b.textContent.trim() === 'Filtrar');
+            if (filtrar.length === 0) return false;
+            filtrar[filtrar.length - 1].click();
+            return true;
+        })()""")
+        if not clicked:
+            log("  ⚠ Botão Filtrar não encontrado na página")
         page.wait_for_load_state("networkidle")
         time.sleep(2)
     except Exception as e:
