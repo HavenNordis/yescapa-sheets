@@ -169,13 +169,14 @@ def upsert_passages(app_ss, passages, plate):
         if key not in existing:
             new_row = [""] * len(headers)
             for field, val in [
-                ("data",         date_str),
-                ("local",        px["location"]),
-                ("matricula",    plate),
-                ("valor",        px["amount"]),
-                ("incluir",      "TRUE"),
-                ("notas",        ""),
-                ("criado_em",    now_str),
+                ("data",          date_str),
+                ("hora",          px.get("hora", "")),
+                ("local",         px["location"]),
+                ("matricula",     plate),
+                ("valor",         px["amount"]),
+                ("incluir",       "TRUE"),
+                ("notas",         ""),
+                ("criado_em",     now_str),
                 ("atualizado_em", now_str),
             ]:
                 c = hcol(field)
@@ -184,12 +185,17 @@ def upsert_passages(app_ss, passages, plate):
             ws.append_row(new_row, value_input_option="USER_ENTERED")
             inserted += 1
         else:
-            # Só actualiza valor e timestamp — nunca toca em incluir/notas
+            # Actualiza valor, hora e timestamp — nunca toca em incluir/notas
             row_idx = existing[key]
+            updates = {}
             if hcol("valor") >= 0:
-                ws.update_cell(row_idx, hcol("valor") + 1, px["amount"])
+                updates[hcol("valor")] = px["amount"]
+            if hcol("hora") >= 0:
+                updates[hcol("hora")] = px.get("hora", "")
             if hcol("atualizado_em") >= 0:
-                ws.update_cell(row_idx, hcol("atualizado_em") + 1, now_str)
+                updates[hcol("atualizado_em")] = now_str
+            for col_idx, val in updates.items():
+                ws.update_cell(row_idx, col_idx + 1, val)
 
     return inserted
 
@@ -487,6 +493,10 @@ def scrape_movements(page, plate, date_from, date_to):
         if not (date_from <= row_date <= date_to):
             continue
 
+        # Hora HH:MM
+        hm = re.search(r"(\d{2}:\d{2})", desc)
+        hora = hm.group(1) if hm else ""
+
         # Valor: "3,50 €" → 3.50
         vm = re.search(r"([\d]+[,.][\d]{2})", row.get("value", "0"))
         amount = float(vm.group(1).replace(",", ".")) if vm else 0.0
@@ -494,7 +504,7 @@ def scrape_movements(page, plate, date_from, date_to):
         # Local (texto antes do timestamp)
         location = re.sub(r"\s+\d{4}-\d{2}-\d{2}.*", "", desc).strip()
 
-        passages.append({"date": row_date, "location": location, "amount": amount})
+        passages.append({"date": row_date, "hora": hora, "location": location, "amount": amount})
 
     return passages
 
