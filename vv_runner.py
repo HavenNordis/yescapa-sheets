@@ -2,12 +2,14 @@
 vv_runner.py — Via Verde movement scraper
 
 Corre diariamente (chamado por run.py às 19h30 Lisboa).
-Para cada reserva com checkout hoje, ontem ou anteontem:
+Para cada reserva activa (checkin-1 a checkout+3 dias):
   1. Acede ao portal viaverde.pt (empresas)
-  2. Filtra movimentos por matrícula + período
+  2. Filtra movimentos por matrícula + período da reserva
   3. Carrega todos os resultados ("Ver mais")
-  4. Soma as passagens e grava em Cauções:
-       vv_real_confirmado, vv_obs, vv_data_consulta
+  4. Faz upsert de cada passagem em VV_Passagens (uma linha por passagem)
+  5. Recalcula vv_real_confirmado em Cauções com base nas passagens com incluir=TRUE
+
+O staff pode excluir passagens individualmente na App (manutenções, passagens pós-checkout).
 
 Env vars:
   VV_EMAIL              (obrigatório)
@@ -15,10 +17,6 @@ Env vars:
   GOOGLE_CREDENTIALS_JSON
   GOOGLE_SHEET_NAME     (default: "Reservas Yescapa")
   APP_SHEET_NAME        (default: "Haven Nordis · App (Tarefas e Manutenções)")
-
-Pré-requisito único:
-  Partilhar a sheet "Haven Nordis · App (Tarefas e Manutenções)" com o service account
-  yescapa@yescapa-sheets-495311.iam.gserviceaccount.com (Editor).
 """
 
 import json
@@ -44,6 +42,7 @@ GOOGLE_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 APP_SHEET_NAME = os.environ.get("APP_SHEET_NAME", "Haven Nordis · App (Tarefas e Manutenções)")
 TAB_RESERVAS = "Reservas"
 TAB_CAUCOES = "Caucoes"
+TAB_VV_PASS = "VV_Passagens"
 
 VEHICLES = {
     "Celta": "CE-60-LH",
@@ -88,18 +87,23 @@ def normalize_plate(plate):
 
 
 def get_target_bookings(gc):
-    """Reservas com checkout hoje, ontem ou anteontem."""
+    """Reservas activas: janela de scraping = checkin-1 até checkout+3 dias."""
     ss = gc.open(GOOGLE_SHEET_NAME)
     ws = ss.worksheet(TAB_RESERVAS)
     records = ws.get_all_records()
 
     today = datetime.now(LISBON_TZ).date()
-    target_dates = {today, today - timedelta(days=1), today - timedelta(days=2)}
 
     targets = []
     for row in records:
+        checkin  = parse_date(row.get("Data Início", ""))
         checkout = parse_date(row.get("Data Fim", ""))
-        if not checkout or checkout not in target_dates:
+        if not checkin or not checkout:
+            continue
+        # Janela de scraping: dia anterior ao checkin até 3 dias após checkout
+        scrape_start = checkin - timedelta(days=1)
+        scrape_end   = checkout + timedelta(days=3)
+        if not (scrape_start <= today <= scrape_end):
             continue
         bid = str(row.get("ID", "")).strip()
         if not bid:
@@ -111,7 +115,10 @@ def get_target_bookings(gc):
         targets.append({
             "booking_id": bid,
             "plate": plate,
+            "checkin":  checkin,
             "checkout": checkout,
+            "date_from": scrape_start,
+            "date_to":   min(today, scrape_end),
             "guest": str(row.get("Hóspede Nome", "")).strip(),
         })
     return targets
@@ -146,6 +153,125 @@ def get_caucao_row(app_ss, bid):
         if str(row.get("booking_id", "")).strip() == str(bid).strip():
             return ws, row
     return ws, None
+
+
+def get_vv_pass_ws(app_ss):
+    try:
+        return app_ss.worksheet(TAB_VV_PASS)
+    except gspread.exceptions.WorksheetNotFound:
+        return None
+
+
+def upsert_passages(app_ss, bid, passages, plate):
+    """Insere passagens novas em VV_Passagens; não duplica existentes."""
+    ws = get_vv_pass_ws(app_ss)
+    if ws is None:
+        log(f"  ⚠ Tab VV_Passagens não encontrada")
+        return 0
+
+    now_str = datetime.now(LISBON_TZ).strftime("%d/%m/%Y %H:%M")
+    all_vals = ws.get_all_values()
+    if not all_vals:
+        return 0
+
+    headers = all_vals[0]
+    def hcol(name):
+        return headers.index(name) if name in headers else -1
+
+    # Índice de chaves existentes: (bid, data, local, matricula) → row index (1-based, 2+ = dados)
+    existing = {}
+    for i, row in enumerate(all_vals[1:], start=2):
+        key = (
+            row[hcol("booking_id")] if hcol("booking_id") >= 0 else "",
+            row[hcol("data")] if hcol("data") >= 0 else "",
+            row[hcol("local")] if hcol("local") >= 0 else "",
+            row[hcol("matricula")] if hcol("matricula") >= 0 else "",
+        )
+        existing[key] = i
+
+    inserted = 0
+    for px in passages:
+        date_str = px["date"].strftime("%d/%m/%Y")
+        key = (str(bid), date_str, px["location"], plate)
+
+        if key not in existing:
+            new_row = [""] * len(headers)
+            for field, val in [
+                ("booking_id", str(bid)),
+                ("data", date_str),
+                ("local", px["location"]),
+                ("matricula", plate),
+                ("valor", px["amount"]),
+                ("incluir", "TRUE"),
+                ("notas", ""),
+                ("criado_em", now_str),
+                ("atualizado_em", now_str),
+            ]:
+                c = hcol(field)
+                if c >= 0:
+                    new_row[c] = val
+            ws.append_row(new_row, value_input_option="USER_ENTERED")
+            inserted += 1
+        else:
+            # Actualizar valor (pode ter mudado) e atualizado_em
+            row_idx = existing[key]
+            c_val = hcol("valor")
+            c_upd = hcol("atualizado_em")
+            if c_val >= 0:
+                ws.update_cell(row_idx, c_val + 1, px["amount"])
+            if c_upd >= 0:
+                ws.update_cell(row_idx, c_upd + 1, now_str)
+
+    return inserted
+
+
+def recalc_vv_total(app_ss, bid):
+    """Soma passagens com incluir=TRUE e grava em Cauções."""
+    ws = get_vv_pass_ws(app_ss)
+    if ws is None:
+        return 0.0
+
+    all_vals = ws.get_all_values()
+    if not all_vals:
+        return 0.0
+
+    headers = all_vals[0]
+    def hcol(name):
+        return headers.index(name) if name in headers else -1
+
+    total = 0.0
+    for row in all_vals[1:]:
+        if len(row) <= max(hcol("booking_id"), hcol("valor"), hcol("incluir")):
+            continue
+        if row[hcol("booking_id")].strip() != str(bid).strip():
+            continue
+        if row[hcol("incluir")].strip().upper() != "TRUE":
+            continue
+        try:
+            total += float(str(row[hcol("valor")]).replace(",", "."))
+        except (ValueError, IndexError):
+            pass
+
+    total = round(total, 2)
+
+    # Actualizar Cauções
+    try:
+        ws_cau = app_ss.worksheet(TAB_CAUCOES)
+        headers_cau = ws_cau.row_values(1)
+        now_str = datetime.now(LISBON_TZ).strftime("%d/%m/%Y %H:%M")
+        today_str = datetime.now(LISBON_TZ).strftime("%d/%m/%Y")
+        for i, r in enumerate(_ws_records(ws_cau), start=2):
+            if str(r.get("booking_id", "")).strip() == str(bid).strip():
+                def col(n):
+                    return headers_cau.index(n) + 1
+                ws_cau.update_cell(i, col("vv_real_confirmado"), total if total > 0 else "")
+                ws_cau.update_cell(i, col("vv_data_consulta"), today_str)
+                ws_cau.update_cell(i, col("atualizado_em"), now_str)
+                log(f"  ✓ VV total: booking {bid} → {total:.2f}€")
+                return total
+    except Exception as e:
+        log(f"  ⚠ Erro ao actualizar Cauções: {e}")
+    return total
 
 
 def write_vv(app_ss, bid, vv_total, vv_obs):
@@ -452,20 +578,16 @@ def main():
         for t in targets:
             bid = t["booking_id"]
             plate = t["plate"]
-            checkout = t["checkout"]
+            date_from = t["date_from"]
+            date_to = t["date_to"]
 
-            # Saltar se VV já confirmado
+            # Saltar se não tem entrada em Cauções (scraper não cria entradas)
             _, cau = get_caucao_row(app_ss, bid)
-            if cau and str(cau.get("vv_real_confirmado", "")).strip():
-                log(f"  ⏭ {bid} ({plate}): VV já confirmado ({cau['vv_real_confirmado']}€)")
-                continue
             if cau is None:
                 log(f"  ⏭ {bid}: sem entrada em Cauções (cria primeiro na App)")
                 continue
 
-            log(f"  → {bid} | {plate} | checkout {checkout.strftime('%d/%m/%Y')}")
-            date_from = checkout
-            date_to = datetime.now(LISBON_TZ).date()
+            log(f"  → {bid} | {plate} | {date_from.strftime('%d/%m/%Y')}–{date_to.strftime('%d/%m/%Y')}")
 
             try:
                 passages = scrape_movements(page, plate, date_from, date_to)
@@ -473,31 +595,9 @@ def main():
                 log(f"  ✗ Erro ao fazer scraping: {e}")
                 continue
 
-            total = sum(px["amount"] for px in passages)
-            today_str = datetime.now(LISBON_TZ).strftime("%d/%m/%Y")
-
-            if not passages:
-                vv_obs = (
-                    f"Consulta {today_str} | {plate} | "
-                    f"{date_from.strftime('%d/%m/%Y')}–{date_to.strftime('%d/%m/%Y')}: "
-                    f"sem passagens registadas"
-                )
-                vv_total = 0.0
-            else:
-                lines = [
-                    f"Consulta {today_str} | {plate} | "
-                    f"{date_from.strftime('%d/%m/%Y')}–{date_to.strftime('%d/%m/%Y')}"
-                ]
-                for px in sorted(passages, key=lambda x: x["date"]):
-                    lines.append(
-                        f"  {px['date'].strftime('%d/%m/%Y')} — "
-                        f"{px['location']} — {px['amount']:.2f}€"
-                    )
-                lines.append(f"  TOTAL: {total:.2f}€")
-                vv_obs = "\n".join(lines)
-                vv_total = total
-
-            write_vv(app_ss, bid, vv_total, vv_obs)
+            inserted = upsert_passages(app_ss, bid, passages, plate)
+            log(f"    {len(passages)} passagem(ns) encontrada(s), {inserted} nova(s)")
+            recalc_vv_total(app_ss, bid)
             processed += 1
 
         browser.close()
