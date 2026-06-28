@@ -115,13 +115,32 @@ def get_target_bookings(gc):
     return targets
 
 
+def _ws_records(ws):
+    """get_all_records tolerante a colunas vazias/duplicadas no cabeçalho."""
+    try:
+        return ws.get_all_records()
+    except gspread.exceptions.GSpreadException:
+        values = ws.get_all_values()
+        if not values:
+            return []
+        headers = values[0]
+        records = []
+        for row_vals in values[1:]:
+            row_dict = {}
+            for i, h in enumerate(headers):
+                if h and i < len(row_vals):
+                    row_dict[h] = row_vals[i]
+            records.append(row_dict)
+        return records
+
+
 def get_caucao_row(app_ss, bid):
     """Devolve (worksheet, row_dict ou None)."""
     try:
         ws = app_ss.worksheet(TAB_CAUCOES)
     except gspread.exceptions.WorksheetNotFound:
         return None, None
-    for row in ws.get_all_records():
+    for row in _ws_records(ws):
         if str(row.get("booking_id", "")).strip() == str(bid).strip():
             return ws, row
     return ws, None
@@ -144,8 +163,7 @@ def write_vv(app_ss, bid, vv_total, vv_obs):
     today_str = datetime.now(LISBON_TZ).strftime("%d/%m/%Y")
     now_str = datetime.now(LISBON_TZ).strftime("%d/%m/%Y %H:%M")
 
-    records = ws.get_all_records()
-    for i, r in enumerate(records, start=2):
+    for i, r in enumerate(_ws_records(ws), start=2):
         if str(r.get("booking_id", "")).strip() == str(bid).strip():
             ws.update_cell(i, col("vv_real_confirmado"), vv_total)
             ws.update_cell(i, col("vv_obs"), vv_obs)
