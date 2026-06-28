@@ -86,42 +86,12 @@ def normalize_plate(plate):
     return re.sub(r"[-\s]", "", str(plate)).upper()
 
 
-def get_target_bookings(gc):
-    """Reservas activas: janela de scraping = checkin-1 até checkout+3 dias."""
-    ss = gc.open(GOOGLE_SHEET_NAME)
-    ws = ss.worksheet(TAB_RESERVAS)
-    records = ws.get_all_records()
+SCRAPE_DAYS = 30  # janela de varrimento diário: últimos N dias
 
+def get_scrape_window():
+    """Devolve (date_from, date_to) para o varrimento diário."""
     today = datetime.now(LISBON_TZ).date()
-
-    targets = []
-    for row in records:
-        checkin  = parse_date(row.get("Data Início", ""))
-        checkout = parse_date(row.get("Data Fim", ""))
-        if not checkin or not checkout:
-            continue
-        # Janela de scraping: dia anterior ao checkin até 3 dias após checkout
-        scrape_start = checkin - timedelta(days=1)
-        scrape_end   = checkout + timedelta(days=3)
-        if not (scrape_start <= today <= scrape_end):
-            continue
-        bid = str(row.get("ID", "")).strip()
-        if not bid:
-            continue
-        veh_name = str(row.get("Veículo", "")).strip()
-        plate = next((v for k, v in VEHICLES.items() if k in veh_name), None)
-        if not plate:
-            continue
-        targets.append({
-            "booking_id": bid,
-            "plate": plate,
-            "checkin":  checkin,
-            "checkout": checkout,
-            "date_from": scrape_start,
-            "date_to":   min(today, scrape_end),
-            "guest": str(row.get("Hóspede Nome", "")).strip(),
-        })
-    return targets
+    return today - timedelta(days=SCRAPE_DAYS), today
 
 
 def _ws_records(ws):
@@ -162,11 +132,14 @@ def get_vv_pass_ws(app_ss):
         return None
 
 
-def upsert_passages(app_ss, bid, passages, plate):
-    """Insere passagens novas em VV_Passagens; não duplica existentes."""
+def upsert_passages(app_ss, passages, plate):
+    """Insere passagens em VV_Passagens sem associação a reservas.
+    Chave de upsert: (data, local, matricula).
+    Nunca sobrescreve incluir/notas — preserva decisões do staff.
+    """
     ws = get_vv_pass_ws(app_ss)
     if ws is None:
-        log(f"  ⚠ Tab VV_Passagens não encontrada")
+        log("  ⚠ Tab VV_Passagens não encontrada")
         return 0
 
     now_str = datetime.now(LISBON_TZ).strftime("%d/%m/%Y %H:%M")
@@ -178,13 +151,12 @@ def upsert_passages(app_ss, bid, passages, plate):
     def hcol(name):
         return headers.index(name) if name in headers else -1
 
-    # Índice de chaves existentes: (bid, data, local, matricula) → row index (1-based, 2+ = dados)
+    # Índice de chaves existentes: (data, local, matricula) → row index (2-based)
     existing = {}
     for i, row in enumerate(all_vals[1:], start=2):
         key = (
-            row[hcol("booking_id")] if hcol("booking_id") >= 0 else "",
-            row[hcol("data")] if hcol("data") >= 0 else "",
-            row[hcol("local")] if hcol("local") >= 0 else "",
+            row[hcol("data")]      if hcol("data")      >= 0 else "",
+            row[hcol("local")]     if hcol("local")     >= 0 else "",
             row[hcol("matricula")] if hcol("matricula") >= 0 else "",
         )
         existing[key] = i
@@ -192,19 +164,18 @@ def upsert_passages(app_ss, bid, passages, plate):
     inserted = 0
     for px in passages:
         date_str = px["date"].strftime("%d/%m/%Y")
-        key = (str(bid), date_str, px["location"], plate)
+        key = (date_str, px["location"], plate)
 
         if key not in existing:
             new_row = [""] * len(headers)
             for field, val in [
-                ("booking_id", str(bid)),
-                ("data", date_str),
-                ("local", px["location"]),
-                ("matricula", plate),
-                ("valor", px["amount"]),
-                ("incluir", "TRUE"),
-                ("notas", ""),
-                ("criado_em", now_str),
+                ("data",         date_str),
+                ("local",        px["location"]),
+                ("matricula",    plate),
+                ("valor",        px["amount"]),
+                ("incluir",      "TRUE"),
+                ("notas",        ""),
+                ("criado_em",    now_str),
                 ("atualizado_em", now_str),
             ]:
                 c = hcol(field)
@@ -213,14 +184,12 @@ def upsert_passages(app_ss, bid, passages, plate):
             ws.append_row(new_row, value_input_option="USER_ENTERED")
             inserted += 1
         else:
-            # Actualizar valor (pode ter mudado) e atualizado_em
+            # Só actualiza valor e timestamp — nunca toca em incluir/notas
             row_idx = existing[key]
-            c_val = hcol("valor")
-            c_upd = hcol("atualizado_em")
-            if c_val >= 0:
-                ws.update_cell(row_idx, c_val + 1, px["amount"])
-            if c_upd >= 0:
-                ws.update_cell(row_idx, c_upd + 1, now_str)
+            if hcol("valor") >= 0:
+                ws.update_cell(row_idx, hcol("valor") + 1, px["amount"])
+            if hcol("atualizado_em") >= 0:
+                ws.update_cell(row_idx, hcol("atualizado_em") + 1, now_str)
 
     return inserted
 
@@ -537,34 +506,26 @@ def main():
         log("VV_EMAIL ou VV_PASSWORD não definidos — a saltar")
         return "skipped: no credentials"
 
-    gc = get_gc()
-    targets = get_target_bookings(gc)
-
-    if not targets:
-        log("Sem reservas com checkout nos últimos 3 dias")
-        return "ok: nothing to do"
-
-    log(f"{len(targets)} reserva(s) a verificar")
-
     try:
+        gc = get_gc()
         app_ss = gc.open(APP_SHEET_NAME)
     except gspread.exceptions.SpreadsheetNotFound:
-        log(f"Sheet '{APP_SHEET_NAME}' não encontrada — partilha-a com o service account")
+        log(f"Sheet '{APP_SHEET_NAME}' não encontrada")
         return "error: app sheet not found"
+
+    date_from, date_to = get_scrape_window()
+    log(f"Varrimento: {date_from.strftime('%d/%m/%Y')} → {date_to.strftime('%d/%m/%Y')}")
 
     processed = 0
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        )
+        ctx = browser.new_context(user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ))
         page = ctx.new_page()
 
-        # Login inicial
         page.goto(VV_URL, wait_until="networkidle")
         time.sleep(2)
         if not _is_logged_in(page):
@@ -575,34 +536,21 @@ def main():
                 browser.close()
                 return "error: login failed"
 
-        for t in targets:
-            bid = t["booking_id"]
-            plate = t["plate"]
-            date_from = t["date_from"]
-            date_to = t["date_to"]
-
-            # Saltar se não tem entrada em Cauções (scraper não cria entradas)
-            _, cau = get_caucao_row(app_ss, bid)
-            if cau is None:
-                log(f"  ⏭ {bid}: sem entrada em Cauções (cria primeiro na App)")
-                continue
-
-            log(f"  → {bid} | {plate} | {date_from.strftime('%d/%m/%Y')}–{date_to.strftime('%d/%m/%Y')}")
-
+        for plate in VEHICLES.values():
+            log(f"  → {plate} | {date_from.strftime('%d/%m/%Y')}–{date_to.strftime('%d/%m/%Y')}")
             try:
                 passages = scrape_movements(page, plate, date_from, date_to)
             except Exception as e:
-                log(f"  ✗ Erro ao fazer scraping: {e}")
+                log(f"  ✗ Erro ao fazer scraping de {plate}: {e}")
                 continue
 
-            inserted = upsert_passages(app_ss, bid, passages, plate)
-            log(f"    {len(passages)} passagem(ns) encontrada(s), {inserted} nova(s)")
-            recalc_vv_total(app_ss, bid)
+            inserted = upsert_passages(app_ss, passages, plate)
+            log(f"    {len(passages)} passagem(ns), {inserted} nova(s)")
             processed += 1
 
         browser.close()
 
-    return f"ok: {processed} booking(s) processed"
+    return f"ok: {processed} matrícula(s) processada(s)"
 
 
 if __name__ == "__main__":
