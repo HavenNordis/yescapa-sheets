@@ -251,28 +251,28 @@ def scrape_movements(page, plate, date_from, date_to):
         page.goto(VV_URL, wait_until="networkidle")
         time.sleep(2)
 
-    # Activar aba "Movimentos"
+    # Activar aba "Movimentos" (o filtro já fica expandido nessa aba)
     try:
         page.locator("a:has-text('Movimentos')").first.click()
+        page.wait_for_load_state("networkidle")
         time.sleep(1)
     except Exception:
         pass
 
-    # Filtro: matrícula (input[placeholder=" "] dentro de .advance-filter-wrapper)
+    # Filtro: matrícula — input.input com placeholder=" " dentro de div.tags
     try:
-        _set_angular(page, '.advance-filter-wrapper input[placeholder=" "]', plate)
+        _set_angular(page, 'input.input[placeholder=" "]', plate)
         time.sleep(0.3)
     except Exception:
         log("  ⚠ Não foi possível preencher o filtro de matrícula")
 
-    # Filtro: datas (2 datepickers dentro de .advance-filter-wrapper)
+    # Filtro: datas — 2 datepickers dentro de div.filter-expanded-wrapper
     from_str = date_from.strftime("%d/%m/%Y")
     to_str = date_to.strftime("%d/%m/%Y")
     page.evaluate(
         """([from_s, to_s]) => {
-            const w = document.querySelector('.advance-filter-wrapper');
-            if (!w) return;
-            const dps = w.querySelectorAll('input.datepicker');
+            const dps = document.querySelectorAll(
+                'div.filter-expanded-wrapper input.datepicker');
             if (dps.length < 2) return;
             function set(inp, val) {
                 const s = Object.getOwnPropertyDescriptor(
@@ -288,9 +288,9 @@ def scrape_movements(page, plate, date_from, date_to):
     )
     time.sleep(0.3)
 
-    # Botão "Filtrar" visível (o da aba Movimentos)
+    # Botão "Filtrar" — único visível na aba Movimentos
     try:
-        page.locator("button:has-text('Filtrar'):visible").last.click()
+        page.locator("button.button:has-text('Filtrar')").click()
         page.wait_for_load_state("networkidle")
         time.sleep(2)
     except Exception as e:
