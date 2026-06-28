@@ -288,9 +288,14 @@ def scrape_movements(page, plate, date_from, date_to):
     )
     time.sleep(0.3)
 
-    # Botão "Filtrar" — único visível na aba Movimentos
+    # Botão "Filtrar" — clicar via JS para evitar conflito com o botão escondido do Extratos
     try:
-        page.locator("button.button:has-text('Filtrar')").click()
+        page.evaluate("""
+            const btns = Array.from(document.querySelectorAll('button.button'));
+            const btn = btns.find(b => b.textContent.trim() === 'Filtrar' && b.offsetParent !== null);
+            if (btn) btn.click();
+            else throw new Error('Filtrar button not found or not visible');
+        """)
         page.wait_for_load_state("networkidle")
         time.sleep(2)
     except Exception as e:
