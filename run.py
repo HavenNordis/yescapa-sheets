@@ -127,13 +127,14 @@ def run_whatsapp_notification():
 def run_vv():
     """Consulta Via Verde para reservas com checkout recente e grava passagens em Cauções.
 
-    Corre uma vez por dia, à noite (19h30 Lisboa = 18h30 UTC).
+    Corre várias vezes por dia (de 3 em 3h): 09/12/15/18/21 Lisboa, no 1.º slot
+    de 15 min de cada hora. Assim a app mostra passagens mais atualizadas quando a
+    Joana carrega em "Atualizar passagens Via Verde".
     Falha em silêncio — não interrompe o cron.
     """
     from zoneinfo import ZoneInfo
     now_lisbon = datetime.now(ZoneInfo("Europe/Lisbon"))
-    # Só correr entre 18h30 e 20h00 Lisboa (1.º slot de 15 min das 18h30)
-    if not (18 * 60 + 30 <= now_lisbon.hour * 60 + now_lisbon.minute < 20 * 60):
+    if not (now_lisbon.hour in (9, 12, 15, 18, 21) and now_lisbon.minute < 15):
         return
     log("A iniciar consulta Via Verde...")
     try:
