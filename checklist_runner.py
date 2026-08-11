@@ -42,7 +42,7 @@ from dotenv import load_dotenv
 
 from checklist_generator import generate_checklist_pdf
 from drive_archiver import (
-    get_google_clients, find_or_create_folder, find_file, upload_pdf,
+    get_google_clients, find_or_create_folder, find_file, upload_pdf, update_pdf,
     booking_folder_name, resolve_booking_folder, full_guest_name, folder_url, file_url,
     DRIVE_DOCS_ROOT_FOLDER_ID,
 )
@@ -449,9 +449,12 @@ def run() -> dict:
             filename = f"Checklist #{ref}.pdf"
             existing = find_file(drive, filename, folder_id)
             if existing:
-                # Substitui um PDF anterior (resposta atualizada) — apaga e recria.
-                drive.files().delete(fileId=existing, supportsAllDrives=True).execute()
-            fid = upload_pdf(drive, pdf, filename, folder_id)
+                # Atualiza o conteúdo no MESMO ficheiro (mantém o link). Antes
+                # apagava+recriava, mas o delete dava 404 (conta de serviço tem
+                # edição mas não é dona → só o dono apaga em My Drive).
+                fid = update_pdf(drive, pdf, existing)
+            else:
+                fid = upload_pdf(drive, pdf, filename, folder_id)
             vv_str = "Sim" if data.get("via_verde") else "Não"
             upsert_state(state_ws, state_map, sid, ref, ESTADO_GERADO,
                          pdf_drive=file_url(fid), via_verde=vv_str)

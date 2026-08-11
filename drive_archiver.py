@@ -273,6 +273,20 @@ def upload_pdf(drive, pdf_bytes: bytes, name: str, folder_id: str) -> str:
     return file["id"]
 
 
+def update_pdf(drive, pdf_bytes: bytes, file_id: str) -> str:
+    """Substitui o CONTEÚDO de um ficheiro existente (mesmo ID, mesmo link).
+    Só precisa de permissão de EDIÇÃO — evita o delete, que em My Drive exige ser
+    o dono do ficheiro (a conta de serviço tem edição mas não é dona dos PDFs
+    antigos, pelo que o delete devolvia 404 e a regeneração falhava)."""
+    media = MediaIoBaseUpload(
+        io.BytesIO(pdf_bytes), mimetype="application/pdf", resumable=False,
+    )
+    drive.files().update(
+        fileId=file_id, media_body=media, fields="id", supportsAllDrives=True,
+    ).execute()
+    return file_id
+
+
 def folder_url(folder_id: str) -> str:
     return f"https://drive.google.com/drive/folders/{folder_id}"
 
