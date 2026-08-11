@@ -40,7 +40,7 @@ LISBON_TZ = ZoneInfo("Europe/Lisbon")
 import gspread
 from dotenv import load_dotenv
 
-from checklist_generator import generate_checklist_pdf
+from checklist_generator import generate_checklist_pdf, generate_tally_pdf
 from drive_archiver import (
     get_google_clients, find_or_create_folder, find_file, upload_pdf, update_pdf,
     booking_folder_name, resolve_booking_folder, full_guest_name, folder_url, file_url,
@@ -70,7 +70,9 @@ CHECKLISTS_HEADERS = [
 # ou "gerado:vN" anterior) são regeneradas UMA vez e depois voltam a ser terminais.
 # v2: suporte a respostas do formulário Tally em inglês (antes saíam a "N/A").
 # v3: texto livre (crianças/pedidos) e kit parcial nas notas + página 3 de conferência.
-CHECKLIST_VERSION = "3"
+# v4: checklist volta a 2 páginas; respostas do Tally passam a PDF SEPARADO
+#     ("Formulário Tally #ref.pdf") na mesma pasta, com ícone próprio na app.
+CHECKLIST_VERSION = "4"
 ESTADO_GERADO = f"gerado:v{CHECKLIST_VERSION}"
 ESTADOS_TERMINAIS = {ESTADO_GERADO}  # sem_reserva/falhou/versões antigas são reprocessados
 
@@ -455,6 +457,18 @@ def run() -> dict:
                 fid = update_pdf(drive, pdf, existing)
             else:
                 fid = upload_pdf(drive, pdf, filename, folder_id)
+
+            # Formulário Tally como documento SEPARADO (ícone próprio na app).
+            # Nome sem "checklist"/"check-in" para não colidir com a deteção da checklist.
+            form_pdf = generate_tally_pdf(data)
+            if form_pdf:
+                form_name = f"Formulário Tally #{ref}.pdf"
+                form_existing = find_file(drive, form_name, folder_id)
+                if form_existing:
+                    update_pdf(drive, form_pdf, form_existing)
+                else:
+                    upload_pdf(drive, form_pdf, form_name, folder_id)
+
             vv_str = "Sim" if data.get("via_verde") else "Não"
             upsert_state(state_ws, state_map, sid, ref, ESTADO_GERADO,
                          pdf_drive=file_url(fid), via_verde=vv_str)

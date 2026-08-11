@@ -513,7 +513,8 @@ def _draw_page3(c, d: dict):
 # --- API pública ----------------------------------------------------------
 
 def generate_checklist_pdf(data: dict) -> bytes:
-    """Gera o PDF (2 páginas + página de conferência) e devolve os bytes."""
+    """Gera o PDF da checklist (2 páginas principais) e devolve os bytes.
+    As respostas do Tally saem num documento separado — ver generate_tally_pdf()."""
     d = normalize_checklist_data(data)
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(PW, PH))
@@ -522,9 +523,21 @@ def generate_checklist_pdf(data: dict) -> bytes:
     c.showPage()
     _draw_page2(c, d)
     c.showPage()
-    if d.get("respostas_tally"):
-        _draw_page3(c, d)
-        c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def generate_tally_pdf(data: dict):
+    """Gera o PDF do FORMULÁRIO Tally (respostas do hóspede) como documento
+    próprio, para consulta/impressão avulsa. Devolve None se não houver respostas."""
+    d = normalize_checklist_data(data)
+    if not d.get("respostas_tally"):
+        return None
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(PW, PH))
+    c.setTitle(f"Formulário #{d['reserva_ref']} — {d['cliente_nome']}")
+    _draw_page3(c, d)
+    c.showPage()
     c.save()
     return buf.getvalue()
 
