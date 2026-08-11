@@ -66,24 +66,31 @@ CHECKLISTS_MAX_PER_RUN = int(os.getenv("CHECKLISTS_MAX_PER_RUN", "15"))
 CHECKLISTS_HEADERS = [
     "tally_submission_id", "booking_id", "estado", "timestamp", "pdf_drive", "erro", "via_verde",
 ]
-ESTADOS_TERMINAIS = {"gerado"}  # sem_reserva/falhou são reprocessados
+# Versão do gerador. Ao subir a versão, todas as checklists antigas (estado "gerado"
+# ou "gerado:vN" anterior) são regeneradas UMA vez e depois voltam a ser terminais.
+# v2: suporte a respostas do formulário Tally em inglês (antes saíam a "N/A").
+CHECKLIST_VERSION = "2"
+ESTADO_GERADO = f"gerado:v{CHECKLIST_VERSION}"
+ESTADOS_TERMINAIS = {ESTADO_GERADO}  # sem_reserva/falhou/versões antigas são reprocessados
 
 # Palavras-chave para casar o título de cada pergunta Tally com o campo interno.
 # ⚠️ Confirmar contra uma submissão real — ver checklist_template_design.md.
-KW_KIT_CONFORTO = ("roupa de cama", "kit conforto")
-KW_CAMA_CABINE = ("cabine", "capucine")
-KW_BELICHES = ("beliche",)
-KW_SALA_GRANDE = ("sala grande",)
-KW_SALA_PEQUENA = ("sala pequena",)
-KW_MICROONDAS = ("micro-onda", "microonda", "micro onda")
-KW_MAQUINA_CAFE = ("máquina de café", "maquina de cafe", "café")
-KW_MESA_EXTERIOR = ("mesa exterior", "mesa")
-KW_CADEIRAS = ("cadeira", "número de cadeira")
-KW_BANCOS = ("banco",)
-KW_VIA_VERDE = ("via verde",)
-KW_CADEIRA_AUTO = ("cadeirinha", "cadeira de criança", "cadeira auto", "bebé")
-KW_PEDIDOS = ("pedido", "indicaç", "observa", "especia")
-KW_REF = ("ref", "referência", "referencia")
+# Incluem PT (form zx2ORZ) E EN (form BzAOr5) — sem as EN, respostas em inglês
+# não casavam com nenhuma pergunta e a checklist saía toda a "N/A".
+KW_KIT_CONFORTO = ("roupa de cama", "kit conforto", "bedding")
+KW_CAMA_CABINE = ("cabine", "capucine", "over-cab", "cab bed")
+KW_BELICHES = ("beliche", "bunk")
+KW_SALA_GRANDE = ("sala grande", "main lounge")
+KW_SALA_PEQUENA = ("sala pequena", "rear lounge")
+KW_MICROONDAS = ("micro-onda", "microonda", "micro onda", "microwave")
+KW_MAQUINA_CAFE = ("máquina de café", "maquina de cafe", "café", "coffee", "nespresso")
+KW_MESA_EXTERIOR = ("mesa exterior", "mesa", "outdoor table", "table")
+KW_CADEIRAS = ("cadeira", "número de cadeira", "chair")
+KW_BANCOS = ("banco", "stool")
+KW_VIA_VERDE = ("via verde", "toll")
+KW_CADEIRA_AUTO = ("cadeirinha", "cadeira de criança", "cadeira auto", "bebé", "car seat")
+KW_PEDIDOS = ("pedido", "indicaç", "observa", "especia", "request", "special", "notes")
+KW_REF = ("ref", "referência", "referencia", "reference")
 
 
 # --- Logging --------------------------------------------------------------
@@ -389,7 +396,7 @@ def run() -> dict:
                 drive.files().delete(fileId=existing, supportsAllDrives=True).execute()
             fid = upload_pdf(drive, pdf, filename, folder_id)
             vv_str = "Sim" if data.get("via_verde") else "Não"
-            upsert_state(state_ws, state_map, sid, ref, "gerado",
+            upsert_state(state_ws, state_map, sid, ref, ESTADO_GERADO,
                          pdf_drive=file_url(fid), via_verde=vv_str)
             log(f"  ✓ submissão {sid} → checklist #{ref} ({nome})")
             gerados += 1
