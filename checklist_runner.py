@@ -69,7 +69,8 @@ CHECKLISTS_HEADERS = [
 # Versão do gerador. Ao subir a versão, todas as checklists antigas (estado "gerado"
 # ou "gerado:vN" anterior) são regeneradas UMA vez e depois voltam a ser terminais.
 # v2: suporte a respostas do formulário Tally em inglês (antes saíam a "N/A").
-CHECKLIST_VERSION = "2"
+# v3: texto livre (crianças/pedidos) e kit parcial nas notas + página 3 de conferência.
+CHECKLIST_VERSION = "3"
 ESTADO_GERADO = f"gerado:v{CHECKLIST_VERSION}"
 ESTADOS_TERMINAIS = {ESTADO_GERADO}  # sem_reserva/falhou/versões antigas são reprocessados
 
@@ -89,6 +90,7 @@ KW_CADEIRAS = ("cadeira", "número de cadeira", "chair")
 KW_BANCOS = ("banco", "stool")
 KW_VIA_VERDE = ("via verde", "toll")
 KW_CADEIRA_AUTO = ("cadeirinha", "cadeira de criança", "cadeira auto", "bebé", "car seat")
+KW_CRIANCAS = ("idade", "altura", "peso", "children", "weight and height")
 KW_PEDIDOS = ("pedido", "indicaç", "observa", "especia", "request", "special", "notes")
 KW_REF = ("ref", "referência", "referencia", "reference")
 
@@ -135,11 +137,38 @@ def sala_grande_extensores(resposta: str) -> int:
     return 1
 
 
-def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
+def kit_modo(resposta: str) -> str:
+    """Modo do kit conforto: 'full' | 'roupa' | 'toalhas' | 'nenhum'.
+    Opções PT/EN: kit completo / apenas roupa de cama / apenas toalhas / nenhum.
+    """
+    v = _norm(resposta)
+    if not v:
+        return "nenhum"
+    if "completo" in v or "full" in v:
+        return "full"
+    if v.startswith("não") or v.startswith("nao") or v.startswith("no"):
+        return "nenhum"
+    if v.startswith("sim") or v.startswith("yes"):
+        return "full"
+    tem_roupa = "cama" in v or "bedding" in v
+    tem_toalha = "toalha" in v or "towel" in v
+    if tem_roupa and tem_toalha:
+        return "full"
+    if tem_roupa:
+        return "roupa"
+    if tem_toalha:
+        return "toalhas"
+    if v.startswith("s") or v.startswith("y"):
+        return "full"
+    return "nenhum"
+
+
+def tally_to_checklist_data(answers: dict, booking: dict, respostas: list = None) -> dict:
     """Cruza a resposta Tally com a reserva e devolve o dict para o gerador.
 
     `answers`: {titulo_pergunta_normalizado: resposta}.
     `booking`: linha da folha Reservas (dict).
+    `respostas`: lista ordenada [{q: titulo_original, a: resposta}] p/ a página de conferência.
     """
     veiculo = str(booking.get("Veículo", "") or "").strip()
     matricula = str(booking.get("Matrícula", "") or "").strip()
@@ -152,7 +181,21 @@ def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
 
     resp_sala_grande = answer_for(answers, KW_SALA_GRANDE)
     resp_kit = answer_for(answers, KW_KIT_CONFORTO)
+    modo = kit_modo(resp_kit)
     pedidos = answer_for(answers, KW_PEDIDOS)
+    criancas = answer_for(answers, KW_CRIANCAS)
+
+    # Notas: texto livre do hóspede + kit conforto parcial → tudo fica visível
+    # na checklist, sem a equipa ter de ir ao Tally.
+    notas = []
+    if modo == "roupa":
+        notas.append("Kit conforto: APENAS roupa de cama (sem toalhas)")
+    elif modo == "toalhas":
+        notas.append("Kit conforto: APENAS toalhas (sem roupa de cama)")
+    if criancas:
+        notas.append(f"Crianças (idade/peso/altura): {criancas}")
+    if pedidos:
+        notas.append(f"Pedido do hóspede: {pedidos}")
 
     return {
         "cliente_nome": full_guest_name(booking),
@@ -162,8 +205,10 @@ def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
         "dropoff": f"{data_out} às {hora_out}".strip(" às"),
         "num_viajantes": booking.get("Viajantes", ""),
         "paises": str(booking.get("Países Permitidos", "") or "").strip(),
-        # Camas / kit conforto
-        "kit_conforto": _is_sim(resp_kit),
+        # Camas / kit conforto (kit parcial: bedding e towels separados)
+        "kit_conforto": modo != "nenhum",
+        "kit_bedding": modo in ("full", "roupa"),
+        "kit_towels": modo in ("full", "toalhas"),
         "cama_cabine": _is_sim(answer_for(answers, KW_CAMA_CABINE)),
         "beliches": _is_sim(answer_for(answers, KW_BELICHES)),
         "sala_grande": _is_sim(resp_sala_grande),
@@ -179,8 +224,10 @@ def tally_to_checklist_data(answers: dict, booking: dict) -> dict:
         # Outros
         "via_verde": _is_sim(answer_for(answers, KW_VIA_VERDE)),
         "cadeira_auto": _is_sim(answer_for(answers, KW_CADEIRA_AUTO)),
-        # Notas
-        "notas": [pedidos] if pedidos else [],
+        # Notas (texto livre + kit parcial)
+        "notas": notas,
+        # Respostas completas p/ página de conferência
+        "respostas_tally": respostas or [],
     }
 
 
@@ -224,9 +271,11 @@ def fetch_submissions(form_id: str) -> list:
         for sub in payload.get("submissions", []):
             if not sub.get("isCompleted", True):
                 continue
+            ans, respostas = _extract_answers(sub, questions)
             out.append({
                 "id": str(sub.get("id", "")),
-                "answers": _extract_answers(sub, questions),
+                "answers": ans,
+                "respostas": respostas,
             })
         if not payload.get("hasMore"):
             break
@@ -236,16 +285,24 @@ def fetch_submissions(form_id: str) -> list:
     return out
 
 
-def _extract_answers(submission: dict, questions: dict) -> dict:
-    """Constrói {titulo_pergunta_normalizado: resposta_texto} de uma submissão."""
+def _extract_answers(submission: dict, questions: dict):
+    """Devolve (answers, respostas):
+      answers   = {titulo_normalizado: resposta_texto}  — p/ o mapeamento
+      respostas = [{q: titulo_original, a: resposta}]    — ordenado, p/ a conferência
+    """
     answers = {}
+    respostas = []
     for resp in submission.get("responses", []):
         qid = resp.get("questionId")
-        titulo = _norm(questions.get(qid, resp.get("title", "")))
+        titulo_orig = str(questions.get(qid, resp.get("title", "")) or "").strip()
+        titulo = _norm(titulo_orig)
         if not titulo:
             continue
-        answers[titulo] = _answer_text(resp.get("answer", resp.get("value", "")))
-    return answers
+        txt = _answer_text(resp.get("answer", resp.get("value", "")))
+        answers[titulo] = txt
+        if str(txt).strip():
+            respostas.append({"q": titulo_orig, "a": txt})
+    return answers, respostas
 
 
 def _answer_text(answer) -> str:
@@ -383,7 +440,7 @@ def run() -> dict:
             continue
 
         try:
-            data = tally_to_checklist_data(answers, booking)
+            data = tally_to_checklist_data(answers, booking, sub.get("respostas"))
             pdf = generate_checklist_pdf(data)
             nome = full_guest_name(booking)
             folder_id = resolve_booking_folder(

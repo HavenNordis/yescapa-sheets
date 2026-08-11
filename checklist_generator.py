@@ -23,6 +23,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 # A4 landscape
 PW, PH = A4[1], A4[0]  # 297 x 210 mm
@@ -50,6 +51,30 @@ SP = 1 * mm
 
 def hx(h):
     return colors.HexColor(h)
+
+
+def _wrap(txt, font, size, max_w):
+    """Parte `txt` em linhas que cabem em `max_w` (pt)."""
+    words = str(txt).split()
+    lines, cur = [], ""
+    for w in words:
+        t = (cur + " " + w).strip()
+        if stringWidth(t, font, size) <= max_w:
+            cur = t
+            continue
+        if cur:
+            lines.append(cur)
+        # palavra maior que a linha → corta à força
+        while stringWidth(w, font, size) > max_w and len(w) > 1:
+            i = len(w)
+            while i > 1 and stringWidth(w[:i], font, size) > max_w:
+                i -= 1
+            lines.append(w[:i])
+            w = w[i:]
+        cur = w
+    if cur:
+        lines.append(cur)
+    return lines or [""]
 
 
 # --- Normalização de dados ------------------------------------------------
@@ -89,6 +114,9 @@ def normalize_checklist_data(raw: dict) -> dict:
         "num_viajantes": viajantes,
         "paises": str(raw.get("paises", "") or "").strip() or "—",
         "kit_conforto": _as_bool(raw.get("kit_conforto")),
+        # kit parcial: bedding e towels separados (default = kit_conforto p/ compat)
+        "kit_bedding": _as_bool(raw.get("kit_bedding", raw.get("kit_conforto"))),
+        "kit_towels": _as_bool(raw.get("kit_towels", raw.get("kit_conforto"))),
         "cama_cabine": _as_bool(raw.get("cama_cabine")),
         "beliches": _as_bool(raw.get("beliches")),
         "sala_grande": _as_bool(raw.get("sala_grande")),
@@ -102,6 +130,8 @@ def normalize_checklist_data(raw: dict) -> dict:
         "via_verde": _as_bool(raw.get("via_verde")),
         "cadeira_auto": _as_bool(raw.get("cadeira_auto")),
         "notas": notas,
+        # Respostas completas do Tally (para a página de conferência)
+        "respostas_tally": raw.get("respostas_tally") or [],
         # Totais calculados (1 por hóspede) — design v1.0
         "total_fronhas": viajantes,
         "total_sacos_cama": viajantes,
@@ -176,7 +206,7 @@ def _header(c, title, subtitle):
 
 def _bed_lines(d: dict) -> list:
     """Resolve as 5 linhas de roupa de cama conforme as camas pedidas."""
-    if not d["kit_conforto"]:
+    if not d["kit_bedding"]:
         traz = "hóspede traz a sua roupa"
         return [
             f"Cama cabine (casal): {traz if d['cama_cabine'] else 'N/A'}",
@@ -200,7 +230,7 @@ def _bed_lines(d: dict) -> list:
 
 
 def _towel_lines(d: dict) -> list:
-    if not d["kit_conforto"]:
+    if not d["kit_towels"]:
         return [
             "Fronhas — hóspede traz  |  Sacos cama — hóspede traz",
             "Toalhas grandes — hóspede traz  |  Toalhas pequenas — hóspede traz",
@@ -407,16 +437,26 @@ def _draw_page2(c, d: dict):
     cy -= 2 * mm
     cy = _section(c, cx, cy, CW, "📝  NOTAS DO SISTEMA", COL["amber"])
     note_h = ROW_H
-    _filled_rect(c, cx, cy - note_h * 4, CW, note_h * 4, COL["amber_light"])
+    tem_pg3 = bool(d.get("respostas_tally"))
+    linhas = []
+    for nota in d["notas"]:
+        linhas += _wrap("◈  " + str(nota), "Helvetica-Bold", 7.5, CW - 6 * mm)
+    if not linhas:
+        linhas = ["◈  —"]
+    avail = cy - (MB + 5 * mm)                 # espaço até ao rodapé
+    maxrows = max(4, int(avail // note_h))
+    if len(linhas) > maxrows:
+        aviso = "◈  → ver página 3 (respostas completas do hóspede)" if tem_pg3 else "◈  (…)"
+        linhas = linhas[:maxrows - 1] + [aviso]
+    rows = max(4, len(linhas))
+    _filled_rect(c, cx, cy - note_h * rows, CW, note_h * rows, COL["amber_light"])
     c.setStrokeColor(hx(COL["amber"]))
     c.setLineWidth(0.5)
     c.setDash(3, 2)
-    c.rect(cx, cy - note_h * 4, CW, note_h * 4, fill=0, stroke=1)
+    c.rect(cx, cy - note_h * rows, CW, note_h * rows, fill=0, stroke=1)
     c.setDash()
-    notas = (d["notas"] + ["", "", "", ""])[:4]
-    for i, nota in enumerate(notas):
-        txt = f"◈  {nota}" if nota else "◈  —"
-        _text(c, cx + 3 * mm, cy - note_h * (i + 1) + 1.5 * mm, txt,
+    for i, ln in enumerate(linhas):
+        _text(c, cx + 3 * mm, cy - note_h * (i + 1) + 1.5 * mm, ln,
               size=7.5, color=COL["amber"], bold=True)
 
     _text(c, ML, MB,
@@ -426,10 +466,54 @@ def _draw_page2(c, d: dict):
           size=6.5, color=COL["lightblue"], align="center")
 
 
+# --- Página 3 — Conferência: respostas do hóspede (Tally) -----------------
+
+def _draw_page3(c, d: dict):
+    """Lista TODAS as respostas do formulário, tal como submetidas.
+    É a página de conferência: garante que nada do Tally fica de fora."""
+    def cabecalho():
+        yy = _header(
+            c, "INFORMAÇÃO DO HÓSPEDE — RESPOSTAS DO FORMULÁRIO",
+            f"{d['cliente_nome']}  ·  Ref. #{d['reserva_ref']}  ·  fonte: Tally (conferência)",
+        )
+        return yy - 3 * mm
+
+    y = cabecalho()
+    _text(c, ML, y,
+          "Todas as respostas do hóspede, tal como submetidas — confirma que a checklist reflete esta informação.",
+          size=8, color=COL["subtext"])
+    y -= 7 * mm
+
+    respostas = d.get("respostas_tally") or []
+    full_w = PW - ML - MR
+    for item in respostas:
+        q = str(item.get("q", "")).strip()
+        a = str(item.get("a", "")).strip()
+        if not q and not a:
+            continue
+        qlines = _wrap(q or "—", "Helvetica-Bold", 8, full_w)
+        alines = _wrap(a or "—", "Helvetica", 9, full_w - 4 * mm)
+        need = len(qlines) * 4.2 * mm + len(alines) * 4.8 * mm + 2.5 * mm
+        if y - need < MB + 6 * mm:
+            c.showPage()
+            y = cabecalho()
+            y -= 2 * mm
+        for ql in qlines:
+            _text(c, ML, y, ql, size=8, bold=True, color=COL["subtext"])
+            y -= 4.2 * mm
+        for al in alines:
+            _text(c, ML + 4 * mm, y, al, size=9, color=COL["text"])
+            y -= 4.8 * mm
+        y -= 2.5 * mm
+
+    _text(c, PW / 2, MB, "Informação do hóspede (Tally) · Haven Nordis",
+          size=6.5, color=COL["lightblue"], align="center")
+
+
 # --- API pública ----------------------------------------------------------
 
 def generate_checklist_pdf(data: dict) -> bytes:
-    """Gera o PDF de 2 páginas e devolve os bytes."""
+    """Gera o PDF (2 páginas + página de conferência) e devolve os bytes."""
     d = normalize_checklist_data(data)
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(PW, PH))
@@ -438,6 +522,9 @@ def generate_checklist_pdf(data: dict) -> bytes:
     c.showPage()
     _draw_page2(c, d)
     c.showPage()
+    if d.get("respostas_tally"):
+        _draw_page3(c, d)
+        c.showPage()
     c.save()
     return buf.getvalue()
 
