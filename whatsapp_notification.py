@@ -104,6 +104,11 @@ from links_config import (
     GUIAS_VIDEO_ID,
 )
 
+# Shortener com marca Haven Nordis (r.havennordis.com). shortener constrói os
+# slugs/URLs; redirect_store escreve o mapa slug→Tally no Vercel Edge Config.
+import shortener
+import redirect_store
+
 WHATSAPP_HEADERS = [
     "booking_id", "estado", "timestamp", "telefone", "idioma", "erro",
 ]
@@ -273,7 +278,36 @@ def build_form_link(booking: dict, language: str) -> str:
     return base_url + "?" + urllib.parse.urlencode(params)
 
 
-def render_msg_whatsapp(booking: dict, language: str = None) -> str:
+def registar_links_curtos(booking: dict) -> dict:
+    """Regista o mapa slug→URL Tally no Vercel Edge Config e devolve os links
+    a usar na mensagem (chaves link_formulario_pt / link_formulario_en).
+
+    Degradação graciosa: se o shortener estiver desligado, em DRY_RUN, ou se a
+    escrita no Edge Config falhar, devolve os URLs Tally LONGOS. Assim o hóspede
+    recebe SEMPRE um link válido — nunca um link curto que ainda não existe no store.
+    """
+    long_pt = shortener.build_long_tally_url(booking, "pt", TALLY_FORM_URL_PT, TALLY_FORM_URL_EN)
+    long_en = shortener.build_long_tally_url(booking, "en", TALLY_FORM_URL_PT, TALLY_FORM_URL_EN)
+    fallback = {"link_formulario_pt": long_pt, "link_formulario_en": long_en}
+
+    if DRY_RUN or not redirect_store.is_enabled():
+        return fallback
+
+    entries = shortener.kv_entries_for_booking(booking, TALLY_FORM_URL_PT, TALLY_FORM_URL_EN)
+    if not redirect_store.put_bulk(entries):
+        log(f"  ⚠ #{booking.get('ref')}: escrita no Edge Config falhou — uso URL Tally longo")
+        return fallback
+
+    ref = booking.get("ref", "")
+    nome = booking.get("nome", "")
+    apelido = booking.get("apelido", "")
+    return {
+        "link_formulario_pt": shortener.build_short_url(ref, nome, apelido, "pt"),
+        "link_formulario_en": shortener.build_short_url(ref, nome, apelido, "en"),
+    }
+
+
+def render_msg_whatsapp(booking: dict, language: str = None, links: dict = None) -> str:
     """Renderiza a mensagem WhatsApp BILINGUE (PT + separador + EN) para o hóspede.
 
     A mensagem é sempre bilingue, em coerência com o email pré-check-in.
@@ -282,15 +316,24 @@ def render_msg_whatsapp(booking: dict, language: str = None) -> str:
     O parâmetro `language` é mantido por compatibilidade mas IGNORADO — fica
     aqui para não partir chamadores antigos. Pode ser removido depois de toda
     a base de código estar adaptada.
+
+    `links` (opcional): mapa com link_formulario_pt/_en já prontos (curtos ou,
+    em fallback, longos), vindo de registar_links_curtos(). Se None, recorre ao
+    URL Tally longo via build_form_link (comportamento antigo).
     """
     tpl = carregar("whatsapp_msg.txt")
     matricula = booking.get("matricula", "")
+    if links is None:
+        links = {
+            "link_formulario_pt": build_form_link(booking, "pt"),
+            "link_formulario_en": build_form_link(booking, "en"),
+        }
     ctx = {
         "nome": booking.get("nome", ""),
         "viatura": booking.get("viatura", ""),
         "data_in": booking.get("data_in", ""),
-        "link_formulario_pt": build_form_link(booking, "pt"),
-        "link_formulario_en": build_form_link(booking, "en"),
+        "link_formulario_pt": links["link_formulario_pt"],
+        "link_formulario_en": links["link_formulario_en"],
         "link_guia_pt": link_guia_para_viatura(matricula, "pt"),
         "link_guia_en": link_guia_para_viatura(matricula, "en"),
     }
@@ -472,7 +515,11 @@ def run():
         # informar a equipa interna no email de ops@ qual o idioma provável
         # do hóspede (útil para responderem no idioma certo).
         idioma_provavel = detect_language(booking["pais_hospede"])
-        msg = render_msg_whatsapp(booking)
+        # Regista os links curtos no KV (ou fallback p/ URL longo) ANTES de
+        # construir a mensagem, garantindo que o link já resolve quando o
+        # hóspede clicar.
+        links = registar_links_curtos(booking)
+        msg = render_msg_whatsapp(booking, links=links)
         wa_link = build_wa_link(booking["telefone"], msg)
         contacto = contactos_state.get(bid, {})
         contacto_estado_str = contacto.get("estado", "—") or "—"
