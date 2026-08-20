@@ -19,20 +19,37 @@ Env vars:
   APP_SHEET_NAME        (default: "Haven Nordis · App (Tarefas e Manutenções)")
 """
 
+import base64
 import json
 import os
 import re
 import time
 from datetime import datetime, timedelta, date, timezone
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from html import escape as _html_escape
 from zoneinfo import ZoneInfo
 
 import gspread
 import requests
 from html.parser import HTMLParser
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials as UserCredentials
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 from playwright.sync_api import sync_playwright
 
 LISBON_TZ = ZoneInfo("Europe/Lisbon")
+
+# --- Alerta de portagens tardias (email interno ops@) ---
+# Reutiliza as MESMAS env vars do whatsapp_notification.py (Gmail API já
+# configurada no Railway). Se faltarem, o alerta é ignorado sem partir o scraper.
+OPS_NOTIFICATION_EMAIL = os.environ.get("OPS_NOTIFICATION_EMAIL", "ops@havennordis.com")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "ops@havennordis.com")
+SENDER_NAME = os.environ.get("SENDER_NAME", "Haven Nordis")
+GMAIL_CLIENT_ID = os.environ.get("GMAIL_CLIENT_ID")
+GMAIL_CLIENT_SECRET = os.environ.get("GMAIL_CLIENT_SECRET")
+GMAIL_REFRESH_TOKEN = os.environ.get("GMAIL_REFRESH_TOKEN")
 
 VV_EMAIL = os.environ.get("VV_EMAIL", "")
 VV_PASSWORD = os.environ.get("VV_PASSWORD", "")
@@ -146,16 +163,20 @@ def upsert_passages(app_ss, passages, plate):
     """Insere passagens em VV_Passagens sem associação a reservas.
     Chave de upsert: (data, local, matricula).
     Nunca sobrescreve incluir/notas — preserva decisões do staff.
+
+    Devolve a lista das passagens REALMENTE novas (inseridas neste run), cada uma
+    como dict {date, hora, location, amount, plate} — usada pelo alerta de
+    portagens tardias. (Antes devolvia só a contagem de inseridas.)
     """
     ws = get_vv_pass_ws(app_ss)
     if ws is None:
         log("  ⚠ Tab VV_Passagens não encontrada")
-        return 0
+        return []
 
     now_str = datetime.now(LISBON_TZ).strftime("%d/%m/%Y %H:%M")
     all_vals = ws.get_all_values()
     if not all_vals:
-        return 0
+        return []
 
     headers = all_vals[0]
     def hcol(name):
@@ -171,7 +192,7 @@ def upsert_passages(app_ss, passages, plate):
         )
         existing[key] = i
 
-    inserted = 0
+    new_passages = []
     for px in passages:
         date_str = px["date"].strftime("%d/%m/%Y")
         key = (date_str, px["location"], plate)
@@ -193,7 +214,10 @@ def upsert_passages(app_ss, passages, plate):
                 if c >= 0:
                     new_row[c] = val
             ws.append_row(new_row, value_input_option="USER_ENTERED")
-            inserted += 1
+            new_passages.append({
+                "date": px["date"], "hora": px.get("hora", ""),
+                "location": px["location"], "amount": px["amount"], "plate": plate,
+            })
         else:
             # Actualiza valor, hora e timestamp — nunca toca em incluir/notas
             row_idx = existing[key]
@@ -207,7 +231,7 @@ def upsert_passages(app_ss, passages, plate):
             for col_idx, val in updates.items():
                 ws.update_cell(row_idx, col_idx + 1, val)
 
-    return inserted
+    return new_passages
 
 
 def recalc_vv_total(app_ss, bid):
@@ -519,6 +543,178 @@ def scrape_movements(page, plate, date_from, date_to):
     return passages
 
 
+# ── Alerta de portagens tardias ─────────────────────────────────────────────────
+
+def load_reservas_records(gc):
+    try:
+        ss = gc.open(GOOGLE_SHEET_NAME)
+        return _ws_records(ss.worksheet(TAB_RESERVAS))
+    except Exception as e:
+        log(f"  ⚠ alerta: não consegui ler Reservas ({type(e).__name__}: {e})")
+        return []
+
+
+def _resolve_booking(reservas, plate, pdate):
+    """Reserva a que pertence uma passagem: mesma matrícula e início ≤ data ≤ fim."""
+    pn = normalize_plate(plate)
+    for r in reservas:
+        if normalize_plate(str(r.get("Matrícula", ""))) != pn:
+            continue
+        ci = parse_date(r.get("Data Início"))
+        co = parse_date(r.get("Data Fim"))
+        if ci and co and ci <= pdate <= co:
+            return r
+    return None
+
+
+def _caucao_estado(app_ss, bid):
+    try:
+        _, row = get_caucao_row(app_ss, bid)
+        return str((row or {}).get("estado", "")).strip()
+    except Exception:
+        return ""
+
+
+def _fmt_eur(v):
+    try:
+        return f"{float(str(v).replace(',', '.')):.2f} €".replace(".", ",")
+    except Exception:
+        return f"{v} €"
+
+
+def _send_ops_email(subject, html, body_text):
+    if not all([GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN]):
+        log("  ⚠ alerta: faltam env vars GMAIL_* — email não enviado")
+        return False
+    try:
+        creds = UserCredentials(
+            token=None, refresh_token=GMAIL_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GMAIL_CLIENT_ID, client_secret=GMAIL_CLIENT_SECRET,
+            scopes=["https://www.googleapis.com/auth/gmail.send"],
+        )
+        creds.refresh(Request())
+        svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body_text, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+        msg["To"] = OPS_NOTIFICATION_EMAIL
+        msg["From"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
+        msg["Subject"] = subject
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        svc.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True
+    except Exception as e:
+        log(f"  ✗ alerta: falha ao enviar email ({type(e).__name__}: {e})")
+        return False
+
+
+def alert_late_passages(gc, app_ss, new_passages):
+    """Avisa a equipa (email ops@) quando entram portagens de reservas JÁ
+    TERMINADAS (checkout < hoje) — o caso em que é preciso cobrar ao cliente à
+    parte, porque a caução pode já ter sido devolvida.
+
+    Só considera passagens inseridas NESTE varrimento (cada uma alerta 1x).
+    Passagens de reservas a decorrer/futuras não alertam (a equipa vê-as no
+    fecho da caução); passagens sem reserva atribuível também não.
+    """
+    if not new_passages:
+        return
+    hoje = datetime.now(LISBON_TZ).date()
+    reservas = load_reservas_records(gc)
+    if not reservas:
+        return
+
+    items = []
+    for px in new_passages:
+        b = _resolve_booking(reservas, px["plate"], px["date"])
+        if not b:
+            continue
+        co = parse_date(b.get("Data Fim"))
+        if not co or co >= hoje:
+            continue  # reserva a decorrer ou futura — não alerta
+        bid = str(b.get("ID", "")).strip()
+        items.append({
+            "bid": bid,
+            "hospede": f"{b.get('Hóspede Nome', '')} {b.get('Hóspede Apelido', '')}".strip(),
+            "veiculo": f"{b.get('Veículo', '')} ({px['plate']})".strip(),
+            "data_in": str(b.get("Data Início", "")),
+            "data_out": str(b.get("Data Fim", "")),
+            "px_data": px["date"].strftime("%d/%m/%Y"),
+            "px_hora": px.get("hora", ""),
+            "px_local": px["location"],
+            "px_valor": px["amount"],
+            "caucao_estado": _caucao_estado(app_ss, bid),
+        })
+    if not items:
+        return
+
+    by_bid = {}
+    for it in items:
+        by_bid.setdefault(it["bid"], []).append(it)
+
+    n_px, n_res = len(items), len(by_bid)
+    subject = (f"⚠ Via Verde: {n_px} portagem(ns) tardia(s) em {n_res} "
+               f"reserva(s) já terminada(s) — verificar cobrança")
+
+    rows_html, lines_txt, total_geral = [], [], 0.0
+    for bid, its in by_bid.items():
+        head = its[0]
+        est = head["caucao_estado"]
+        # "devolvida" (definitiva/parcial) = dinheiro já devolvido → urgente.
+        # NB: "a_devolver" NÃO conta (ainda por devolver) — daí "devolvida", não "devolv".
+        devolvida = "devolvida" in est.lower()
+        flag = "🔴 CAUÇÃO JÁ DEVOLVIDA" if devolvida else ("🟡 caução: " + (est or "—"))
+        subtot = 0.0
+        for it in its:
+            try:
+                subtot += float(str(it["px_valor"]).replace(",", "."))
+            except Exception:
+                pass
+        total_geral += subtot
+        rows_html.append(
+            "<tr><td colspan='3' style='padding:12px 8px 4px;border-top:2px solid #ddd'>"
+            f"<b>#{_html_escape(bid)} · {_html_escape(head['hospede'])}</b> — "
+            f"{_html_escape(head['veiculo'])}<br>"
+            f"<span style='color:#666;font-size:13px'>estadia {_html_escape(head['data_in'])} → "
+            f"{_html_escape(head['data_out'])} · subtotal {_fmt_eur(subtot)} · {flag}</span></td></tr>"
+        )
+        lines_txt.append(
+            f"#{bid} · {head['hospede']} — {head['veiculo']} "
+            f"(estadia {head['data_in']}->{head['data_out']}, {flag}, subtotal {_fmt_eur(subtot)})"
+        )
+        for it in its:
+            rows_html.append(
+                "<tr>"
+                f"<td style='padding:4px 8px'>{_html_escape(it['px_data'])} {_html_escape(it['px_hora'])}</td>"
+                f"<td style='padding:4px 8px'>{_html_escape(it['px_local'])}</td>"
+                f"<td style='padding:4px 8px;text-align:right;white-space:nowrap'>{_fmt_eur(it['px_valor'])}</td>"
+                "</tr>"
+            )
+            lines_txt.append(f"    {it['px_data']} {it['px_hora']} · {it['px_local']} · {_fmt_eur(it['px_valor'])}")
+
+    html = (
+        "<div style='font-family:Arial,sans-serif;max-width:640px;color:#222'>"
+        "<h2 style='color:#b00;margin-bottom:4px'>Portagens Via Verde tardias</h2>"
+        "<p>Entraram no último varrimento portagens de reservas <b>já terminadas</b>. "
+        "Confirmem se é preciso <b>cobrar ao cliente</b> à parte — a caução pode já ter sido devolvida.</p>"
+        f"<table style='border-collapse:collapse;width:100%;font-size:14px'><tbody>{''.join(rows_html)}</tbody></table>"
+        f"<p style='margin-top:12px;font-size:15px'><b>Total das portagens tardias: {_fmt_eur(total_geral)}</b></p>"
+        "<p style='color:#888;font-size:12px'>Alerta automático do robô Via Verde. "
+        "Na App › Cauções, abre a reserva e carrega «Atualizar passagens Via Verde» para ver o detalhe.</p>"
+        "</div>"
+    )
+    body_text = (
+        "Portagens Via Verde tardias (reservas já terminadas):\n\n"
+        + "\n".join(lines_txt)
+        + f"\n\nTotal: {_fmt_eur(total_geral)}\n"
+    )
+
+    if _send_ops_email(subject, html, body_text):
+        log(f"  ✉ alerta enviado a {OPS_NOTIFICATION_EMAIL}: "
+            f"{n_px} portagem(ns) tardia(s) em {n_res} reserva(s)")
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
@@ -556,6 +752,7 @@ def main():
                 browser.close()
                 return "error: login failed"
 
+        all_new = []
         for plate in VEHICLES.values():
             log(f"  → {plate} | {date_from.strftime('%d/%m/%Y')}–{date_to.strftime('%d/%m/%Y')}")
             try:
@@ -564,11 +761,18 @@ def main():
                 log(f"  ✗ Erro ao fazer scraping de {plate}: {e}")
                 continue
 
-            inserted = upsert_passages(app_ss, passages, plate)
-            log(f"    {len(passages)} passagem(ns), {inserted} nova(s)")
+            new_px = upsert_passages(app_ss, passages, plate)
+            log(f"    {len(passages)} passagem(ns), {len(new_px)} nova(s)")
+            all_new.extend(new_px)
             processed += 1
 
         browser.close()
+
+    # Alerta: portagens que entraram agora mas pertencem a reservas já terminadas
+    try:
+        alert_late_passages(gc, app_ss, all_new)
+    except Exception as e:
+        log(f"  ⚠ alerta: erro inesperado ({type(e).__name__}: {e})")
 
     return f"ok: {processed} matrícula(s) processada(s)"
 
