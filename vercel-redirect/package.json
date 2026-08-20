@@ -1,0 +1,9 @@
+{
+  "name": "havennordis-redirect",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Redirect curto com marca Haven Nordis (r.havennordis.com) → formulario Tally de pre-check-in.",
+  "dependencies": {
+    "@vercel/edge-config": "^1.4.0"
+  }
+}
