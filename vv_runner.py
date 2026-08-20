@@ -90,7 +90,13 @@ def normalize_plate(plate):
     return re.sub(r"[-\s]", "", str(plate)).upper()
 
 
-SCRAPE_DAYS = 30  # janela de varrimento diário: últimos N dias
+# Janela de varrimento diário: últimos N dias.
+# 60 (e não 30) porque as portagens ESTRANGEIRAS (Espanha/roaming) entram na
+# Via Verde com atraso de semanas — filtramos pela DATA DA PASSAGEM, por isso
+# uma janela curta perdia-as para sempre quando só apareciam >30 dias depois.
+# O upsert é idempotente e nunca sobrescreve incluir/notas, logo reprocessar
+# dias antigos é seguro.
+SCRAPE_DAYS = 60
 
 def get_scrape_window():
     """Devolve (date_from, date_to) para o varrimento diário."""
