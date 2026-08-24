@@ -722,6 +722,29 @@ def alert_late_passages(gc, app_ss, new_passages):
             f"{n_px} portagem(ns) tardia(s) em {n_res} reserva(s)")
 
 
+# ── Backfill único (auto-limitado por marca em VV_Config) ───────────────────────
+
+def _backfill_done(app_ss):
+    """True se o backfill largo já foi feito (marca em VV_Config)."""
+    try:
+        ws = app_ss.worksheet("VV_Config")
+    except gspread.exceptions.WorksheetNotFound:
+        return False
+    for r in _ws_records(ws):
+        if str(r.get("chave", "")).strip() == "backfill_done" and str(r.get("valor", "")).strip():
+            return True
+    return False
+
+
+def _mark_backfill_done(app_ss):
+    try:
+        ws = app_ss.worksheet("VV_Config")
+    except gspread.exceptions.WorksheetNotFound:
+        ws = app_ss.add_worksheet(title="VV_Config", rows=20, cols=2)
+        ws.append_row(["chave", "valor"])
+    ws.append_row(["backfill_done", datetime.now(LISBON_TZ).strftime("%Y-%m-%d %H:%M")])
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
@@ -736,8 +759,14 @@ def main():
         log(f"Sheet '{APP_SHEET_NAME}' não encontrada")
         return "error: app sheet not found"
 
-    date_from, date_to = get_scrape_window()
-    log(f"Varrimento: {date_from.strftime('%d/%m/%Y')} → {date_to.strftime('%d/%m/%Y')}")
+    # Janela: normalmente 60 dias. Se SCRAPE_DAYS estiver em modo backfill (>90) E
+    # ainda não houver marca "backfill_done", faz UM varrimento largo e marca no fim.
+    _today = datetime.now(LISBON_TZ).date()
+    doing_backfill = (SCRAPE_DAYS > BACKFILL_THRESHOLD_DAYS) and not _backfill_done(app_ss)
+    _days = SCRAPE_DAYS if doing_backfill else min(SCRAPE_DAYS, 60)
+    date_from, date_to = _today - timedelta(days=_days), _today
+    log(f"Varrimento: {date_from.strftime('%d/%m/%Y')} → {date_to.strftime('%d/%m/%Y')}"
+        + (f"  [BACKFILL único {_days}d]" if doing_backfill else ""))
 
     processed = 0
     with sync_playwright() as p:
@@ -775,10 +804,18 @@ def main():
 
         browser.close()
 
+    # Fecha o backfill: marca como feito para os próximos varrimentos voltarem a 60 dias.
+    if doing_backfill and processed > 0:
+        try:
+            _mark_backfill_done(app_ss)
+            log("  ✓ backfill único concluído — próximos varrimentos voltam a 60 dias")
+        except Exception as e:
+            log(f"  ⚠ não consegui marcar backfill_done ({type(e).__name__}: {e})")
+
     # Alerta: portagens que entraram agora mas pertencem a reservas já terminadas.
-    # Desligado em modo backfill (janela larga) para não spammar ops@.
-    if SCRAPE_DAYS > BACKFILL_THRESHOLD_DAYS:
-        log(f"  ⓘ backfill ({SCRAPE_DAYS}d): alerta de portagens tardias DESLIGADO")
+    # Desligado durante o backfill (janela larga) para não spammar ops@.
+    if doing_backfill:
+        log("  ⓘ backfill único: alerta de portagens tardias DESLIGADO nesta corrida")
     else:
         try:
             alert_late_passages(gc, app_ss, all_new)
