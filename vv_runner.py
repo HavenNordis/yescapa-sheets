@@ -113,7 +113,14 @@ def normalize_plate(plate):
 # uma janela curta perdia-as para sempre quando só apareciam >30 dias depois.
 # O upsert é idempotente e nunca sobrescreve incluir/notas, logo reprocessar
 # dias antigos é seguro.
-SCRAPE_DAYS = 60
+# NB (ago/2026): BACKFILL março–agosto em curso — valor temporariamente 200.
+# REVERTER para 60 depois de um run_vv completar (repõe a janela normal).
+# Overridável por env VV_SCRAPE_DAYS.
+SCRAPE_DAYS = int(os.environ.get("VV_SCRAPE_DAYS", "200"))
+
+# Acima deste nº de dias considera-se "backfill": desliga o alerta de portagens
+# tardias (senão o 1º varrimento largo mandava um email gigante a ops@).
+BACKFILL_THRESHOLD_DAYS = 90
 
 def get_scrape_window():
     """Devolve (date_from, date_to) para o varrimento diário."""
@@ -481,8 +488,8 @@ def scrape_movements(page, plate, date_from, date_to):
     except Exception as e:
         log(f"  ⚠ Erro ao clicar Filtrar: {e}")
 
-    # Carregar todos os resultados
-    for _ in range(40):
+    # Carregar todos os resultados (cap alto p/ suportar backfill de meses)
+    for _ in range(120):
         try:
             btn = page.locator("button.button-border:has-text('Ver mais')")
             if not btn.is_visible(timeout=1500):
@@ -768,11 +775,15 @@ def main():
 
         browser.close()
 
-    # Alerta: portagens que entraram agora mas pertencem a reservas já terminadas
-    try:
-        alert_late_passages(gc, app_ss, all_new)
-    except Exception as e:
-        log(f"  ⚠ alerta: erro inesperado ({type(e).__name__}: {e})")
+    # Alerta: portagens que entraram agora mas pertencem a reservas já terminadas.
+    # Desligado em modo backfill (janela larga) para não spammar ops@.
+    if SCRAPE_DAYS > BACKFILL_THRESHOLD_DAYS:
+        log(f"  ⓘ backfill ({SCRAPE_DAYS}d): alerta de portagens tardias DESLIGADO")
+    else:
+        try:
+            alert_late_passages(gc, app_ss, all_new)
+        except Exception as e:
+            log(f"  ⚠ alerta: erro inesperado ({type(e).__name__}: {e})")
 
     return f"ok: {processed} matrícula(s) processada(s)"
 
