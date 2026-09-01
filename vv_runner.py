@@ -141,10 +141,11 @@ def parse_eur(text):
 # uma janela curta perdia-as para sempre quando só apareciam >30 dias depois.
 # O upsert é idempotente e nunca sobrescreve incluir/notas, logo reprocessar
 # dias antigos é seguro.
-# NB (ago/2026): BACKFILL março–agosto em curso — valor temporariamente 200.
-# REVERTER para 60 depois de um run_vv completar (repõe a janela normal).
-# Overridável por env VV_SCRAPE_DAYS.
-SCRAPE_DAYS = int(os.environ.get("VV_SCRAPE_DAYS", "200"))
+# Janela de varrimento diário (dias). 60 cobre o atraso de reconciliação das
+# portagens estrangeiras. Overridável por env VV_SCRAPE_DAYS; se >90 (e sem a
+# marca backfill_done em VV_Config) faz UM varrimento largo e volta a 60.
+# (Backfill março–agosto já foi feito em 24/08/2026 — ver [[robo-yescapa-railway]].)
+SCRAPE_DAYS = int(os.environ.get("VV_SCRAPE_DAYS", "60"))
 
 # Acima deste nº de dias considera-se "backfill": desliga o alerta de portagens
 # tardias (senão o 1º varrimento largo mandava um email gigante a ops@).
@@ -566,18 +567,13 @@ def scrape_movements(page, plate, date_from, date_to):
         hm = re.search(r"(\d{2}:\d{2})", desc)
         hora = hm.group(1) if hm else ""
 
-        # Valor faturado — parse robusto (Decimal, HALF_UP, sem truncar; ver parse_eur)
-        raw_value = row.get("value", "0")
-        amount = parse_eur(raw_value)
+        # Valor faturado — parse robusto (Decimal, HALF_UP, sem truncar; ver parse_eur).
+        # NB: para portagens estrangeiras (Espanha/Galiza) a vista Movimentos mostra o
+        # provisório de Classe 1 (≈ metade do faturado de Classe 2, que só está no Extrato).
+        amount = parse_eur(row.get("value", "0"))
 
         # Local (texto antes do timestamp)
         location = re.sub(r"\s+\d{4}-\d{2}-\d{2}.*", "", desc).strip()
-
-        # DIAGNÓSTICO (temporário): loga o texto CRU do valor das passagens
-        # estrangeiras (Espanha/França/roaming) para percebermos a divergência
-        # Movimentos vs Extrato (metades de Classe 1 vs Classe 2). Remover depois.
-        if FOREIGN.search(location):
-            log(f"    [vv-debug] {plate} {row_date} {location!r} valor_cru={raw_value!r} → {amount:.2f}")
 
         passages.append({"date": row_date, "hora": hora, "location": location, "amount": amount})
 
