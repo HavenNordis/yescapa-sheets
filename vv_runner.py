@@ -24,6 +24,7 @@ import json
 import os
 import re
 import time
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, date, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -105,6 +106,33 @@ def parse_date(s):
 
 def normalize_plate(plate):
     return re.sub(r"[-\s]", "", str(plate)).upper()
+
+
+_MONEY_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+# Marcadores de portagens estrangeiras (Espanha/Galiza/França/roaming) — usado só
+# para o log de diagnóstico das divergências Movimentos vs Extrato.
+FOREIGN = re.compile(
+    r"puxeiros|nigran|porrino|carballo|arteixo|\btui\b|vedra|barrera|audasa|"
+    r"barque|saint\s+martin|irun|etxabarri|roaming|desconhecido",
+    re.I,
+)
+
+def parse_eur(text):
+    """Texto da célula de valor → float com 2 casas (cêntimos), arredondado HALF_UP.
+
+    Corrige 3 defeitos do regex antigo `([\\d]+[,.][\\d]{2})`:
+      • truncava a 2 casas (7,255 € → 7,25 em vez de 7,26);
+      • não apanhava euros redondos sem decimais (16 € → 0);
+      • float sem arredondamento controlado.
+    Se a célula tiver >1 valor monetário (ex.: bonificado + faturado), usa o MAIOR
+    — nunca um valor descontado menor.
+    """
+    nums = _MONEY_RE.findall((text or "").replace(" ", " "))
+    if not nums:
+        return 0.0
+    best = max(Decimal(n.replace(",", ".")) for n in nums)
+    return float(best.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 # Janela de varrimento diário: últimos N dias.
@@ -538,12 +566,18 @@ def scrape_movements(page, plate, date_from, date_to):
         hm = re.search(r"(\d{2}:\d{2})", desc)
         hora = hm.group(1) if hm else ""
 
-        # Valor: "3,50 €" → 3.50
-        vm = re.search(r"([\d]+[,.][\d]{2})", row.get("value", "0"))
-        amount = float(vm.group(1).replace(",", ".")) if vm else 0.0
+        # Valor faturado — parse robusto (Decimal, HALF_UP, sem truncar; ver parse_eur)
+        raw_value = row.get("value", "0")
+        amount = parse_eur(raw_value)
 
         # Local (texto antes do timestamp)
         location = re.sub(r"\s+\d{4}-\d{2}-\d{2}.*", "", desc).strip()
+
+        # DIAGNÓSTICO (temporário): loga o texto CRU do valor das passagens
+        # estrangeiras (Espanha/França/roaming) para percebermos a divergência
+        # Movimentos vs Extrato (metades de Classe 1 vs Classe 2). Remover depois.
+        if FOREIGN.search(location):
+            log(f"    [vv-debug] {plate} {row_date} {location!r} valor_cru={raw_value!r} → {amount:.2f}")
 
         passages.append({"date": row_date, "hora": hora, "location": location, "amount": amount})
 
