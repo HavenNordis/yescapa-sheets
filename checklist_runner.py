@@ -72,7 +72,7 @@ CHECKLISTS_HEADERS = [
 # v3: texto livre (crianças/pedidos) e kit parcial nas notas + página 3 de conferência.
 # v4: checklist volta a 2 páginas; respostas do Tally passam a PDF SEPARADO
 #     ("Formulário Tally #ref.pdf") na mesma pasta, com ícone próprio na app.
-CHECKLIST_VERSION = "4"
+CHECKLIST_VERSION = "5"  # v5: mapeamento EN por posição (robusto p/ respostas inglesas)
 ESTADO_GERADO = f"gerado:v{CHECKLIST_VERSION}"
 ESTADOS_TERMINAIS = {ESTADO_GERADO}  # sem_reserva/falhou/versões antigas são reprocessados
 
@@ -84,7 +84,7 @@ KW_KIT_CONFORTO = ("roupa de cama", "kit conforto", "bedding")
 KW_CAMA_CABINE = ("cabine", "capucine", "over-cab", "cab bed")
 KW_BELICHES = ("beliche", "bunk")
 KW_SALA_GRANDE = ("sala grande", "main lounge")
-KW_SALA_PEQUENA = ("sala pequena", "rear lounge")
+KW_SALA_PEQUENA = ("sala pequena", "rear lounge", "small lounge")
 KW_MICROONDAS = ("micro-onda", "microonda", "micro onda", "microwave")
 KW_MAQUINA_CAFE = ("máquina de café", "maquina de cafe", "café", "coffee", "nespresso")
 KW_MESA_EXTERIOR = ("mesa exterior", "mesa", "outdoor table", "table")
@@ -95,6 +95,27 @@ KW_CADEIRA_AUTO = ("cadeirinha", "cadeira de criança", "cadeira auto", "bebé",
 KW_CRIANCAS = ("idade", "altura", "peso", "children", "weight and height")
 KW_PEDIDOS = ("pedido", "indicaç", "observa", "especia", "request", "special", "notes")
 KW_REF = ("ref", "referência", "referencia", "reference")
+
+# Campo da checklist → palavras-chave que identificam a pergunta no Tally.
+# Usado (1) no matching normal e (2) para o mapeamento POR POSIÇÃO entre o form
+# PT e o EN (ver build_en_override), que torna a captação de respostas EN robusta
+# mesmo quando a tradução usa palavras que não estão nas keywords.
+FIELD_KEYWORDS = {
+    "cama_cabine":  KW_CAMA_CABINE,
+    "beliches":     KW_BELICHES,
+    "sala_grande":  KW_SALA_GRANDE,
+    "sala_pequena": KW_SALA_PEQUENA,
+    "microondas":   KW_MICROONDAS,
+    "maquina_cafe": KW_MAQUINA_CAFE,
+    "mesa_exterior": KW_MESA_EXTERIOR,
+    "num_cadeiras": KW_CADEIRAS,
+    "num_bancos":   KW_BANCOS,
+    "via_verde":    KW_VIA_VERDE,
+    "cadeira_auto": KW_CADEIRA_AUTO,
+    "kit":          KW_KIT_CONFORTO,
+    "criancas":     KW_CRIANCAS,
+    "pedidos":      KW_PEDIDOS,
+}
 
 
 # --- Logging --------------------------------------------------------------
@@ -131,6 +152,46 @@ def answer_for(answers: dict, keywords) -> str:
     return ""
 
 
+def field_of_title(titulo: str):
+    """Devolve o campo da checklist que uma pergunta (título) identifica, ou None.
+    É o inverso de FIELD_KEYWORDS — usado para alinhar PT↔EN por posição."""
+    t = _norm(titulo)
+    for field, kws in FIELD_KEYWORDS.items():
+        if any(kw in t for kw in kws):
+            return field
+    return None
+
+
+def build_en_override(pt_titles: list, en_titles: list) -> dict:
+    """Mapeia títulos de perguntas do form EN → campo da checklist, por POSIÇÃO
+    relativa ao form PT (os dois forms são traduções com as mesmas perguntas na
+    mesma ordem). Devolve {titulo_en_normalizado: campo}.
+
+    Rede de segurança para respostas EN: só mapeia uma pergunta EN quando as
+    palavras-chave NÃO a apanharam (field_of_title(en) is None) mas a pergunta PT
+    na mesma posição tem campo conhecido — assim nunca sobrepõe um match correto.
+    Guardas: exige o MESMO nº de perguntas nos dois forms (senão desliga e avisa).
+    """
+    if not pt_titles or not en_titles:
+        return {}
+    if len(pt_titles) != len(en_titles):
+        log(f"  ⚠ forms PT/EN com nº de perguntas diferente "
+            f"({len(pt_titles)} vs {len(en_titles)}) — mapeamento por posição "
+            f"DESLIGADO; a usar só palavras-chave. Verificar alinhamento dos forms.")
+        return {}
+    override = {}
+    for pt_t, en_t in zip(pt_titles, en_titles):
+        campo_pt = field_of_title(pt_t)
+        campo_en = field_of_title(en_t)
+        if campo_pt and campo_en and campo_pt != campo_en:
+            log(f"  ⚠ possível desalinhamento PT/EN: PT={pt_t!r}→{campo_pt} vs "
+                f"EN={en_t!r}→{campo_en} (mantém keyword).")
+            continue
+        if campo_pt and campo_en is None:
+            override[_norm(en_t)] = campo_pt
+    return override
+
+
 def sala_grande_extensores(resposta: str) -> int:
     """Cama da sala grande: opção A → 1 extensor (meio); B → 2 (laterais)."""
     v = _norm(resposta)
@@ -165,13 +226,24 @@ def kit_modo(resposta: str) -> str:
     return "nenhum"
 
 
-def tally_to_checklist_data(answers: dict, booking: dict, respostas: list = None) -> dict:
+def tally_to_checklist_data(answers: dict, booking: dict, respostas: list = None,
+                            field_override: dict = None) -> dict:
     """Cruza a resposta Tally com a reserva e devolve o dict para o gerador.
 
     `answers`: {titulo_pergunta_normalizado: resposta}.
     `booking`: linha da folha Reservas (dict).
     `respostas`: lista ordenada [{q: titulo_original, a: resposta}] p/ a página de conferência.
+    `field_override`: {campo: resposta} de reserva — fallback por POSIÇÃO (forms EN),
+        usado só quando as palavras-chave não apanham a pergunta. Ver build_en_override.
     """
+    fo = field_override or {}
+
+    def pick(campo: str, keywords) -> str:
+        """Resposta para um campo: palavras-chave primeiro; se falhar, o mapeamento
+        por posição (robusto para o form EN)."""
+        v = answer_for(answers, keywords)
+        return v if v else fo.get(campo, "")
+
     veiculo = str(booking.get("Veículo", "") or "").strip()
     matricula = str(booking.get("Matrícula", "") or "").strip()
     viatura = f"{veiculo} ({matricula})".strip() if matricula else (veiculo or matricula)
@@ -181,11 +253,11 @@ def tally_to_checklist_data(answers: dict, booking: dict, respostas: list = None
     data_out = str(booking.get("Data Fim", "") or "").strip()
     hora_out = str(booking.get("Hora Fim", "") or "").strip()
 
-    resp_sala_grande = answer_for(answers, KW_SALA_GRANDE)
-    resp_kit = answer_for(answers, KW_KIT_CONFORTO)
+    resp_sala_grande = pick("sala_grande", KW_SALA_GRANDE)
+    resp_kit = pick("kit", KW_KIT_CONFORTO)
     modo = kit_modo(resp_kit)
-    pedidos = answer_for(answers, KW_PEDIDOS)
-    criancas = answer_for(answers, KW_CRIANCAS)
+    pedidos = pick("pedidos", KW_PEDIDOS)
+    criancas = pick("criancas", KW_CRIANCAS)
 
     # Notas: texto livre do hóspede + kit conforto parcial → tudo fica visível
     # na checklist, sem a equipa ter de ir ao Tally.
@@ -211,21 +283,21 @@ def tally_to_checklist_data(answers: dict, booking: dict, respostas: list = None
         "kit_conforto": modo != "nenhum",
         "kit_bedding": modo in ("full", "roupa"),
         "kit_towels": modo in ("full", "toalhas"),
-        "cama_cabine": _is_sim(answer_for(answers, KW_CAMA_CABINE)),
-        "beliches": _is_sim(answer_for(answers, KW_BELICHES)),
+        "cama_cabine": _is_sim(pick("cama_cabine", KW_CAMA_CABINE)),
+        "beliches": _is_sim(pick("beliches", KW_BELICHES)),
         "sala_grande": _is_sim(resp_sala_grande),
         "sala_grande_extensores": sala_grande_extensores(resp_sala_grande),
-        "sala_pequena": _is_sim(answer_for(answers, KW_SALA_PEQUENA)),
+        "sala_pequena": _is_sim(pick("sala_pequena", KW_SALA_PEQUENA)),
         # Cozinha
-        "microondas": _is_sim(answer_for(answers, KW_MICROONDAS)),
-        "maquina_cafe": _is_sim(answer_for(answers, KW_MAQUINA_CAFE)),
+        "microondas": _is_sim(pick("microondas", KW_MICROONDAS)),
+        "maquina_cafe": _is_sim(pick("maquina_cafe", KW_MAQUINA_CAFE)),
         # Exterior
-        "mesa_exterior": _is_sim(answer_for(answers, KW_MESA_EXTERIOR)),
-        "num_cadeiras": answer_for(answers, KW_CADEIRAS),
-        "num_bancos": answer_for(answers, KW_BANCOS),
+        "mesa_exterior": _is_sim(pick("mesa_exterior", KW_MESA_EXTERIOR)),
+        "num_cadeiras": pick("num_cadeiras", KW_CADEIRAS),
+        "num_bancos": pick("num_bancos", KW_BANCOS),
         # Outros
-        "via_verde": _is_sim(answer_for(answers, KW_VIA_VERDE)),
-        "cadeira_auto": _is_sim(answer_for(answers, KW_CADEIRA_AUTO)),
+        "via_verde": _is_sim(pick("via_verde", KW_VIA_VERDE)),
+        "cadeira_auto": _is_sim(pick("cadeira_auto", KW_CADEIRA_AUTO)),
         # Notas (texto livre + kit parcial)
         "notas": notas,
         # Respostas completas p/ página de conferência
@@ -254,9 +326,11 @@ def _tally_get(path: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch_submissions(form_id: str) -> list:
-    """Devolve todas as submissões completas de um formulário Tally."""
+def fetch_submissions(form_id: str):
+    """Devolve (submissões_completas, titulos_ordenados) de um formulário Tally.
+    `titulos_ordenados` é a lista de perguntas na ordem do form (p/ alinhar PT↔EN)."""
     out = []
+    ordered_titles = []
     page = 1
     while True:
         payload = _tally_get(f"/forms/{form_id}/submissions?page={page}")
@@ -270,6 +344,8 @@ def fetch_submissions(form_id: str) -> list:
                 if fields:
                     title = fields[0].get("title", "")
             questions[q.get("id")] = title or ""
+        if page == 1:
+            ordered_titles = [t for t in questions.values() if str(t).strip()]
         for sub in payload.get("submissions", []):
             if not sub.get("isCompleted", True):
                 continue
@@ -278,13 +354,14 @@ def fetch_submissions(form_id: str) -> list:
                 "id": str(sub.get("id", "")),
                 "answers": ans,
                 "respostas": respostas,
+                "form_id": form_id,
             })
         if not payload.get("hasMore"):
             break
         page += 1
         if page > 50:  # salvaguarda
             break
-    return out
+    return out, ordered_titles
 
 
 def _extract_answers(submission: dict, questions: dict):
@@ -396,12 +473,14 @@ def run() -> dict:
 
     # Recolher submissões Tally novas.
     novas = []
+    form_titles = {}
     for form_id in TALLY_FORM_IDS:
         if not form_id:
             continue
         try:
-            subs = fetch_submissions(form_id)
-            log(f"  Tally [{form_id}]: {len(subs)} submissões")
+            subs, titles = fetch_submissions(form_id)
+            form_titles[form_id] = titles
+            log(f"  Tally [{form_id}]: {len(subs)} submissões, {len(titles)} perguntas")
         except urllib.error.HTTPError as e:
             body = ""
             try:
@@ -418,6 +497,15 @@ def run() -> dict:
                 continue
             novas.append(sub)
 
+    # Mapeamento por posição PT↔EN: rede de segurança para respostas do form EN
+    # cujas perguntas as palavras-chave não apanham (ex.: "small lounge bed").
+    pt_id = TALLY_FORM_IDS[0] if TALLY_FORM_IDS else ""
+    en_id = TALLY_FORM_IDS[1] if len(TALLY_FORM_IDS) > 1 else ""
+    en_override = build_en_override(form_titles.get(pt_id, []), form_titles.get(en_id, []))
+    if en_override:
+        log(f"  Mapeamento EN por posição ativo: {len(en_override)} pergunta(s) cobertas "
+            f"além das palavras-chave")
+
     if not novas:
         log("Sem respostas Tally novas para processar.")
         return {"gerados": 0, "sem_reserva": 0, "falhados": 0, "pendentes": 0}
@@ -430,6 +518,14 @@ def run() -> dict:
     for sub in lote:
         sid = sub["id"]
         answers = sub["answers"]
+        # Fallback por posição: só para submissões do form EN e só preenche campos
+        # que as palavras-chave não apanharam (build_en_override já garante isso).
+        field_override = {}
+        if sub.get("form_id") == en_id and en_override:
+            for titulo_norm, resp in answers.items():
+                campo = en_override.get(titulo_norm)
+                if campo and str(resp).strip():
+                    field_override[campo] = resp
         ref = _norm(answer_for(answers, KW_REF)).upper().lstrip("#").strip()
 
         booking = reservas.get(ref)
@@ -442,7 +538,7 @@ def run() -> dict:
             continue
 
         try:
-            data = tally_to_checklist_data(answers, booking, sub.get("respostas"))
+            data = tally_to_checklist_data(answers, booking, sub.get("respostas"), field_override)
             pdf = generate_checklist_pdf(data)
             nome = full_guest_name(booking)
             folder_id = resolve_booking_folder(
