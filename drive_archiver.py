@@ -47,7 +47,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from zoneinfo import ZoneInfo
 
 LISBON_TZ = ZoneInfo("Europe/Lisbon")
@@ -91,7 +91,13 @@ DOCS_HEADERS = [
 ]
 
 # Estados terminais — reservas nestes estados não voltam a ser processadas.
-ESTADOS_TERMINAIS = {"arquivado", "falhou_permanente"}
+#   incompleto_checkin: o check-in passou e ainda faltava contrato/seguro — paramos
+#   de insistir (a janela de preparação acabou).
+ESTADOS_TERMINAIS = {"arquivado", "falhou_permanente", "incompleto_checkin"}
+
+# Estados "à espera que o Yescapa emita o documento" — re-varridos UMA VEZ POR DIA
+# (até ao check-in no caso do contrato/seguro), não a cada run do cron.
+ESTADOS_ESPERA = {"aguarda_documentos", "aguarda_fatura"}
 
 # Classificação de um URL/link de documento por palavras-chave.
 DOC_CLASSIFY = [
@@ -505,9 +511,35 @@ def load_state(ws) -> dict:
         state[bid] = {
             "estado": str(row.get("estado", "")).strip(),
             "tentativas": tent,
+            "timestamp": str(row.get("timestamp", "") or ""),
+            "pasta": str(row.get("pasta_drive", "") or ""),
+            "contrato": str(row.get("contrato", "") or ""),
+            "seguro": str(row.get("seguro", "") or ""),
+            "fatura": str(row.get("fatura", "") or ""),
             "_row_index": idx + 2,  # +1 header, +1 base-1
         }
     return state
+
+
+def _checkin_date(row: dict):
+    """Data de check-in (Data Início, dd/mm/yyyy) como date, ou None."""
+    m = re.match(r"\s*(\d{2})/(\d{2})/(\d{4})", str(row.get("Data Início", "") or ""))
+    if not m:
+        return None
+    try:
+        return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
+
+
+def _attempt_date(prev: dict):
+    """Data da última tentativa (coluna timestamp 'yyyy-mm-dd_...') como date, ou None."""
+    ts = str(prev.get("timestamp", "") or "")[:10]  # yyyy-mm-dd
+    try:
+        y, mo, d = (int(x) for x in ts.split("-"))
+        return date(y, mo, d)
+    except (ValueError, TypeError):
+        return None
 
 
 def upsert_state(ws, state_map: dict, booking_id: str, estado: str,
@@ -603,15 +635,45 @@ def run() -> dict:
     # Já NÃO exigimos URL da fatura na folha — o contrato e o seguro vêm da
     # página da reserva (estão disponíveis logo após a confirmação), e a
     # fatura é acrescentada quando o Yescapa a gera (URL na folha).
+    hoje = datetime.now(LISBON_TZ).date()
     pendentes = []
+    saltadas_hoje = terminadas_checkin = 0
     for row in rows:
         if not is_archivable(row):
             continue
         ref = str(row.get("ID", "")).strip()
-        estado_atual = state_map.get(ref, {}).get("estado", "")
+        prev = state_map.get(ref, {})
+        estado_atual = prev.get("estado", "")
         if estado_atual in ESTADOS_TERMINAIS:
             continue
+
+        ci = _checkin_date(row)
+        # Depois do check-in: se ainda falta contrato/seguro, paramos de insistir
+        # (a janela de preparação acabou). A fatura (aguarda_fatura) continua a ser
+        # tentada, porque o Yescapa só a emite depois do check-in.
+        if ci and hoje > ci and estado_atual and estado_atual != "aguarda_fatura":
+            upsert_state(
+                docs_ws, state_map, ref, "incompleto_checkin",
+                pasta=prev.get("pasta", ""), contrato=prev.get("contrato", ""),
+                seguro=prev.get("seguro", ""), fatura=prev.get("fatura", ""),
+                tentativas=int(prev.get("tentativas", 0) or 0),
+                erro="check-in passou sem contrato/seguro completos",
+            )
+            terminadas_checkin += 1
+            continue
+
+        # "Uma vez por dia": os estados à espera da emissão pelo Yescapa só voltam
+        # a ser varridos se ainda não foram tentados HOJE. (Reservas novas e falhas
+        # reais continuam a ser tratadas no próprio run.)
+        if estado_atual in ESTADOS_ESPERA and _attempt_date(prev) == hoje:
+            saltadas_hoje += 1
+            continue
+
         pendentes.append((ref, row))
+
+    if terminadas_checkin or saltadas_hoje:
+        log(f"  → {terminadas_checkin} marcada(s) incompleto_checkin, "
+            f"{saltadas_hoje} já varrida(s) hoje (espera diária)")
 
     if not pendentes:
         log("Nada a arquivar — todas as reservas elegíveis já estão tratadas.")
