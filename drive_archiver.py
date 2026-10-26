@@ -164,6 +164,20 @@ def is_archivable(row: dict) -> bool:
     return True
 
 
+def is_direct_booking(row: dict) -> bool:
+    """Reserva direta (ID não numérico, criada no Painel Interno), confirmada e
+    não cancelada. Não tem PDFs no Yescapa, mas precisa da pasta no Drive e da
+    entrada na folha Documentos (é onde o Painel mostra a checklist)."""
+    ref = str(row.get("ID", "") or "").strip()
+    if not ref or ref.isdigit():
+        return False
+    meta = str(row.get("Estado Meta", "") or "").strip().lower()
+    if meta not in ("confirmed", "archived"):
+        return False
+    estado = str(row.get("Estado", "") or "").strip().upper()
+    return "CANCELLED" not in estado and "CANCELED" not in estado
+
+
 def collect_doc_urls(row: dict) -> dict:
     """Devolve {nome_ficheiro: url} para as colunas de documentos preenchidas."""
     urls = {}
@@ -630,6 +644,24 @@ def run() -> dict:
     log(f"A ler estado '{DOCS_WORKSHEET}'...")
     state_map = load_state(docs_ws)
     log(f"  → {len(state_map)} entradas de estado")
+
+    # Reservas diretas: só pasta + entrada em Documentos (estado "direta", não
+    # volta a ser processada). Não precisa de login no Yescapa.
+    for row in rows:
+        if not is_direct_booking(row):
+            continue
+        ref = str(row.get("ID", "")).strip()
+        if state_map.get(ref, {}).get("estado"):
+            continue
+        try:
+            folder_id = resolve_booking_folder(
+                drive, DRIVE_DOCS_ROOT_FOLDER_ID, ref, full_guest_name(row), row,
+            )
+            upsert_state(docs_ws, state_map, ref, "direta", pasta=folder_url(folder_id))
+            log(f"  ✓ #{ref}: reserva direta — pasta criada/registada")
+        except Exception as e:
+            log(f"  ✗ #{ref}: reserva direta, falha a criar pasta ({type(e).__name__}: {e})")
+        time.sleep(0.4)
 
     # Pendentes: todas as reservas arquiváveis e ainda não terminais.
     # Já NÃO exigimos URL da fatura na folha — o contrato e o seguro vêm da

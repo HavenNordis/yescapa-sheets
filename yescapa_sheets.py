@@ -38,6 +38,9 @@ YESCAPA_PASSWORD  = os.environ["YESCAPA_PASSWORD"]
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 WORKSHEET_NAME    = os.getenv("WORKSHEET_NAME", "Reservas")
 LOGSHEET_NAME     = os.getenv("LOGSHEET_NAME", "Log")
+# Aba MANUAL escrita pelo Painel Interno (reservas fora do Yescapa). O sync junta
+# estas linhas à folha Reservas em cada run, para os automatismos as tratarem.
+DIRECT_WORKSHEET  = os.getenv("DIRECT_WORKSHEET", "Reservas Diretas")
 
 YESCAPA_BASE = "https://www.yescapa.pt"
 API_BASE     = "https://api.jelouemoncampingcar.com"
@@ -383,6 +386,26 @@ def parse_booking(raw: dict) -> dict:
     }
 
 
+def direct_rows_to_bookings(records: list[dict], headers: list[str],
+                            yescapa_ids: set) -> list[dict]:
+    """Converte as linhas da aba 'Reservas Diretas' em reservas com os mesmos
+    campos da folha Reservas.
+
+    Saltam-se: linhas sem ID; linhas ligadas a uma reserva Yescapa (coluna
+    'ID Yescapa' preenchida — aí manda a linha do Yescapa e o valor direto vai
+    para 'Pagamentos Extra'); e IDs que colidam com um ID do Yescapa.
+    """
+    out = []
+    for rec in records:
+        bid = str(rec.get("ID", "") or "").strip()
+        if not bid or bid in yescapa_ids:
+            continue
+        if str(rec.get("ID Yescapa", "") or "").strip():
+            continue
+        out.append({h: rec.get(h, "") for h in headers})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # GOOGLE SHEETS
 # ---------------------------------------------------------------------------
@@ -414,6 +437,20 @@ class SheetsClient:
             print(f"Separador '{worksheet_name}' criado.")
 
         return worksheet
+
+    def read_direct_bookings(self, sheet_name: str, headers: list[str],
+                             yescapa_ids: set) -> list[dict]:
+        """Lê a aba de reservas diretas (se existir). Falha → lista vazia, para
+        nunca estragar o sync das reservas Yescapa."""
+        try:
+            ws = self.client.open(sheet_name).worksheet(DIRECT_WORKSHEET)
+            records = ws.get_all_records(numericise_ignore=["all"])  # texto tal e qual
+        except gspread.WorksheetNotFound:
+            return []
+        except Exception as e:
+            print(f"Aviso: não consegui ler '{DIRECT_WORKSHEET}' ({e}) — sem reservas diretas.")
+            return []
+        return direct_rows_to_bookings(records, headers, yescapa_ids)
 
     def update_bookings(self, worksheet, bookings: list[dict]):
         if not bookings:
@@ -502,6 +539,14 @@ def main(trigger: str = "scheduled"):
     sheets = SheetsClient()
     ws = sheets.get_or_create_worksheet(GOOGLE_SHEET_NAME, WORKSHEET_NAME)
     bookings = [parse_booking(b) for b in detailed]
+    if bookings:
+        diretas = sheets.read_direct_bookings(
+            GOOGLE_SHEET_NAME, list(bookings[0].keys()),
+            {str(b.get("ID", "")) for b in bookings},
+        )
+        if diretas:
+            print(f"+ {len(diretas)} reserva(s) direta(s) da aba '{DIRECT_WORKSHEET}'.")
+            bookings += diretas
     sheets.update_bookings(ws, bookings)
     sheets.update_log(GOOGLE_SHEET_NAME, LOGSHEET_NAME, trigger, len(bookings))
 

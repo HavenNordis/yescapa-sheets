@@ -153,3 +153,11 @@ def test_walk_urls():
     assert "https://y.pt/contrato.pdf" in out
     assert "https://y.pt/factura_9.pdf" in out
     assert "https://y.pt/alguma-pagina" not in out
+
+
+def test_is_direct_booking():
+    from drive_archiver import is_direct_booking
+    assert is_direct_booking({"ID": "RD261026153000", "Estado Meta": "confirmed", "Estado": "DIRETA"}) is True
+    assert is_direct_booking({"ID": "RD261026153000", "Estado Meta": "cancelled", "Estado": "CANCELLED_OWNER"}) is False
+    assert is_direct_booking({"ID": "3391737", "Estado Meta": "confirmed", "Estado": ""}) is False
+    assert is_direct_booking({"ID": "", "Estado Meta": "confirmed", "Estado": ""}) is False
