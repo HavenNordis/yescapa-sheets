@@ -113,6 +113,11 @@ class YescapaPlaywright:
                 if i % 10 == 0 or i == len(summaries):
                     print(f"  {i}/{len(summaries)} processadas.")
 
+            # Diagnóstico só-de-leitura do total de arquivadas (envio Haven
+            # DESLIGADO). Não funde resultados → a folha fica intacta. Isolado:
+            # timeout próprio, nunca levanta, nunca impede o sync das planilhas.
+            self._diagnostico_arquivadas(page)
+
             browser.close()
 
         return detailed
@@ -328,6 +333,51 @@ class YescapaPlaywright:
             return resp.json() if resp.ok else {}
         except Exception:
             return {}
+
+    def _diagnostico_arquivadas(self, page) -> None:
+        """DIAGNÓSTICO só-de-leitura (envio Haven desligado): lê o `count` de
+        meta_state=archived SEM filtro de state e compara com a soma dos 4
+        subgrupos arquivados da MESMA captura (que já estão em self._api_counts).
+
+        Garantias: não funde resultados (não toca em self._intercepted → a folha
+        fica intacta); timeout próprio; nunca levanta exceção; nunca impede o
+        sync das planilhas. Regista SÓ totais, instante e resultado — nunca
+        headers, credenciais, respostas completas ou dados de clientes.
+        """
+        instante = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sub = {
+            s: self._api_counts.get(f"archived/{s}", 0)
+            for s in ("TO_COME", "CANCELLED_GUEST", "CANCELLED_OWNER", "CANCELLED_BOTH")
+        }
+        soma = sum(sub.values())
+        detalhe_sub = (
+            f"TO_COME={sub['TO_COME']} CANCELLED_GUEST={sub['CANCELLED_GUEST']} "
+            f"CANCELLED_OWNER={sub['CANCELLED_OWNER']} CANCELLED_BOTH={sub['CANCELLED_BOTH']}"
+        )
+        try:
+            resp = page.request.get(
+                f"{API_BASE}/v4/bookings-owner/?meta_state=archived&page=1&page_size=1",
+                headers=self._api_headers,
+                timeout=15000,
+            )
+            if not resp.ok:
+                print(f"[diagnostico-arquivadas] instante={instante} resultado=indisponivel "
+                      f"http={resp.status} soma_subgrupos={soma} ({detalhe_sub})", flush=True)
+                return
+            data = resp.json()
+            total = data.get("count") if isinstance(data, dict) else None
+            if total is None:
+                print(f"[diagnostico-arquivadas] instante={instante} resultado=sem_count "
+                      f"soma_subgrupos={soma} ({detalhe_sub})", flush=True)
+                return
+            total = int(total)
+            print(f"[diagnostico-arquivadas] instante={instante} "
+                  f"archived_api_total={total} soma_subgrupos={soma} "
+                  f"coincide={total == soma} ({detalhe_sub})", flush=True)
+        except Exception as ex:
+            # Só o TIPO do erro — nunca a mensagem (pode conter URL/headers).
+            print(f"[diagnostico-arquivadas] instante={instante} resultado=erro "
+                  f"tipo={type(ex).__name__} soma_subgrupos={soma} ({detalhe_sub})", flush=True)
 
 
 # ---------------------------------------------------------------------------
