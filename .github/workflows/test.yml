@@ -26,3 +26,38 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
+
+  haven-emitter:
+    name: Haven emitter (Linux, envios desligados)
+    runs-on: ubuntu-latest
+    env:
+      HAVEN_INGEST_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare review fixtures (/reference, /evidence)
+        run: |
+          sudo mkdir -p /reference /evidence
+          sudo chown "$USER" /reference /evidence
+          git show 122eea43aa5b443a1db7724851e5ae4c3c496856:yescapa_sheets.py > /reference/yescapa_sheets.reference.py
+
+      - name: Run Haven emitter suites
+        run: |
+          python test_haven_emitter.py
+          python test_proposal_wiring.py
+          python test_revisao_independente.py
+          python test_main_real.py
+          python test_scraper_signals.py
