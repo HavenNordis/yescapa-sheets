@@ -293,6 +293,9 @@ def send_envelope(env: dict) -> dict:
     token = os.environ["HAVEN_INGEST_TOKEN"].strip()
     body = json.dumps(env, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
+    # Identificar o cliente: o alojamento recusa Python-urllib com HTTP 403/1010.
+    # Não imitar um navegador nem alterar autenticação ou verificação TLS.
+    req.add_header("User-Agent", "HavenDesk-Yescapa/1.1 (+https://havennordis.com)")
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", f"Bearer {token}")  # nunca logado/retornado
     try:

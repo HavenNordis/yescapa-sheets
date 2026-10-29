@@ -172,8 +172,13 @@ def test_transporte():
     # 200 accepted → done
     with patch.dict(os.environ, ACTIVE, clear=True):
         with patch.object(H.urllib.request, "urlopen",
-                          return_value=_Resp(200, b'{"ok":true,"status":"accepted"}')):
+                          return_value=_Resp(200, b'{"ok":true,"status":"accepted"}')) as up:
             ok("200 accepted → done", Q.classify(H.send_envelope(_env())) == "done")
+            request = up.call_args.args[0]
+            ok("cliente Haven identificado, autenticação preservada",
+               request.get_header("User-agent") == "HavenDesk-Yescapa/1.1 (+https://havennordis.com)"
+               and request.get_header("Authorization") == "Bearer " + ACTIVE["HAVEN_INGEST_TOKEN"]
+               and request.get_header("Content-type") == "application/json")
 
     # (11) exceção com marcador privado → não vaza; classifica retry
     with patch.dict(os.environ, ACTIVE, clear=True):
