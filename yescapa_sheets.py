@@ -71,6 +71,9 @@ class YescapaPlaywright:
         self._api_counts: dict[str, int] = {}  # chave: "meta_state" ou "meta_state/state"
         self._api_next: dict[str, str] = {}    # chave → URL base da página 1 para construir paginação
         self._api_headers: dict = {}            # headers capturados do primeiro pedido da SPA à API
+        # Sinais só para a entrega independente ao Haven (não afetam a folha):
+        self.archived_api_total = None          # count de meta_state=archived sem state
+        self.detail_failures = 0                # detalhes que falharam nesta captura
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=HEADLESS, slow_mo=50)
@@ -330,8 +333,12 @@ class YescapaPlaywright:
                 f"{API_BASE}/v4/bookings-owner/{booking_id}/",
                 headers=self._api_headers,
             )
-            return resp.json() if resp.ok else {}
+            if not resp.ok:
+                self.detail_failures = getattr(self, "detail_failures", 0) + 1
+                return {}
+            return resp.json()
         except Exception:
+            self.detail_failures = getattr(self, "detail_failures", 0) + 1
             return {}
 
     def _diagnostico_arquivadas(self, page) -> None:
@@ -371,6 +378,7 @@ class YescapaPlaywright:
                       f"soma_subgrupos={soma} ({detalhe_sub})", flush=True)
                 return
             total = int(total)
+            self.archived_api_total = total     # reutilizável pela entrega Haven
             print(f"[diagnostico-arquivadas] instante={instante} "
                   f"archived_api_total={total} soma_subgrupos={soma} "
                   f"coincide={total == soma} ({detalhe_sub})", flush=True)
@@ -580,27 +588,85 @@ def _col_letter(n: int) -> str:
 def main(trigger: str = "scheduled"):
     print("=== Yescapa → Google Sheets ===")
 
-    # 1. Login + recolha de dados (tudo dentro do browser)
-    detailed = YescapaPlaywright().run()
-    print(f"Total: {len(detailed)} reservas.")
+    # 1. Login + recolha de dados (tudo dentro do browser). Instante único (ms).
+    #    Apanha também SystemExit (sem reservas) para não impedir a recuperação
+    #    da fila Haven; o erro é re-levantado no fim, como antes.
+    yp = None
+    detailed = None
+    snapshot_at = None
+    capture_err = None
+    try:
+        yp = YescapaPlaywright()
+        detailed = yp.run()
+        now = datetime.now(timezone.utc)
+        snapshot_at = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+        print(f"Total: {len(detailed)} reservas.")
+    except (Exception, SystemExit) as e:
+        capture_err = e
 
-    # 2. Guardar no Google Sheets
-    print("\n=== Google Sheets ===")
-    sheets = SheetsClient()
-    ws = sheets.get_or_create_worksheet(GOOGLE_SHEET_NAME, WORKSHEET_NAME)
-    bookings = [parse_booking(b) for b in detailed]
-    if bookings:
-        diretas = sheets.read_direct_bookings(
-            GOOGLE_SHEET_NAME, list(bookings[0].keys()),
-            {str(b.get("ID", "")) for b in bookings},
-        )
-        if diretas:
-            print(f"+ {len(diretas)} reserva(s) direta(s) da aba '{DIRECT_WORKSHEET}'.")
-            bookings += diretas
-    sheets.update_bookings(ws, bookings)
-    sheets.update_log(GOOGLE_SHEET_NAME, LOGSHEET_NAME, trigger, len(bookings))
+    # 2. Cópia SÓ-YESCAPA antes de qualquer acesso ao Sheets (e antes das diretas).
+    yescapa_only = None
+    parse_err = None
+    if detailed is not None:
+        try:
+            yescapa_only = [parse_booking(b) for b in detailed]
+        except Exception as e:
+            parse_err = e
+            yescapa_only = None
 
+    # 3. Guardar no Google Sheets — escrita INALTERADA; erro preservado.
+    sheets_err = None
+    if yescapa_only is not None:
+        try:
+            print("\n=== Google Sheets ===")
+            sheets = SheetsClient()
+            ws = sheets.get_or_create_worksheet(GOOGLE_SHEET_NAME, WORKSHEET_NAME)
+            bookings = list(yescapa_only)
+            if bookings:
+                diretas = sheets.read_direct_bookings(
+                    GOOGLE_SHEET_NAME, list(bookings[0].keys()),
+                    {str(b.get("ID", "")) for b in bookings},
+                )
+                if diretas:
+                    print(f"+ {len(diretas)} reserva(s) direta(s) da aba '{DIRECT_WORKSHEET}'.")
+                    bookings += diretas
+            sheets.update_bookings(ws, bookings)
+            sheets.update_log(GOOGLE_SHEET_NAME, LOGSHEET_NAME, trigger, len(bookings))
+        except (Exception, SystemExit) as e:
+            sheets_err = e
+
+    # 4. Entrega independente ao Haven — DESLIGADA por defeito
+    #    (só com HAVEN_INGEST_ENABLED=true). Corre sempre, mesmo que o Sheets
+    #    ou a captura falhem, para recuperar pendentes. Nunca afeta a folha.
+    try:
+        _entregar_haven(yp if detailed is not None else None, yescapa_only, snapshot_at)
+    except (Exception, SystemExit) as e:
+        print(f"[haven] ignorado sem afetar as planilhas ({type(e).__name__})")
+
+    # 5. Erros originais re-levantados DEPOIS do Haven (o coordenador vê-os).
+    if sheets_err is not None:
+        raise sheets_err
+    if parse_err is not None:
+        raise parse_err
+    if capture_err is not None:
+        raise capture_err
     print("\nConcluído!")
+
+
+def _entregar_haven(yp, yescapa_only, snapshot_at):
+    if os.getenv("HAVEN_INGEST_ENABLED", "").strip().lower() != "true":
+        return  # desligado: não abre a fila, não enfileira, não envia
+    import haven_sync as HS
+    import haven_queue as HQ
+    import haven_emitter as HE
+    q = HQ.HavenQueue(HQ.queue_path())   # exige volume declarado; recusa efémero
+    new_env = None
+    if yp is not None:
+        try:
+            new_env, _erros = HE.build_capture_envelope(yp, yescapa_only, snapshot_at)
+        except Exception:
+            new_env = None               # isolado: nunca impede a drenagem
+    HE.delivery_cycle(q, HS.send_envelope, new_env)
 
 
 if __name__ == "__main__":
