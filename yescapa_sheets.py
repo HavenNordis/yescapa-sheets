@@ -550,6 +550,16 @@ def main(trigger: str = "scheduled"):
     sheets.update_bookings(ws, bookings)
     sheets.update_log(GOOGLE_SHEET_NAME, LOGSHEET_NAME, trigger, len(bookings))
 
+    # 3. Espelho OPCIONAL para o Supabase (Haven Desk). Aditivo, isolado e
+    #    best-effort: corre só se SUPABASE_URL/KEY estiverem definidas e, se
+    #    falhar, nunca afeta a folha (que já foi escrita acima). O import está
+    #    dentro do try de propósito, para nem o import poder quebrar o sync.
+    try:
+        from supabase_mirror import mirror_bookings
+        mirror_bookings(bookings)
+    except Exception as e:
+        print(f"Aviso: espelho Supabase falhou sem afetar a folha ({type(e).__name__}: {e})")
+
     print("\nConcluído!")
 
 
