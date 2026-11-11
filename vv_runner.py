@@ -68,8 +68,8 @@ VEHICLES = {
     "Fjord": "CF-68-JJ",
     # Multivans (aluguer turismo, Yescapa conta João): tenta recolher Via Verde delas.
     # Se não tiverem transponder nesta conta Via Verde, simplesmente não devolve passagens.
-    "Freya": "CE-07-JV",   # azul 8 lugares
-    "Gaia":  "BC-06-NP",   # prata 7 lugares
+    "Gaia":  "CE-07-JV",   # azul 8 lugares
+    "Freya": "BC-06-NP",   # prata 7 lugares
 }
 
 
