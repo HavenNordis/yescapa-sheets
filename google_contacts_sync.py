@@ -49,6 +49,7 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
 SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 RESERVAS_WORKSHEET = os.getenv("WORKSHEET_NAME", "Reservas")
 CONTACTS_WORKSHEET = os.getenv("CONTACTS_WORKSHEET", "Contactos")
+DIRECT_WORKSHEET = os.getenv("DIRECT_WORKSHEET", "Reservas Diretas")
 
 CONTACTS_CLIENT_ID = os.getenv("CONTACTS_CLIENT_ID")
 CONTACTS_CLIENT_SECRET = os.getenv("CONTACTS_CLIENT_SECRET")
@@ -69,6 +70,9 @@ NOMES_AUTOCARAVANAS = {
     "52-US-19": "Krafie",
     "CF-68-JJ": "Fjord",
     "CE-60-LH": "Celta",
+    # Multivans (família)
+    "CE-07-JV": "Gaia",    # azul, 8 lugares
+    "BC-06-NP": "Freya",   # prata, 7 lugares
 }
 
 
@@ -169,6 +173,41 @@ def reservas_to_booking(row: dict) -> dict:
     }
 
 
+def direct_overrides(records: list) -> dict:
+    """Reservas diretas que também estão no Yescapa (aba 'Reservas Diretas' com
+    'ID Yescapa' preenchido): {id_yescapa: dados reais do cliente}.
+
+    Nessas reservas a conta Yescapa foi criada pela Haven (email alias do ops@),
+    por isso o nome/telefone/email certos são os que pusemos no Painel."""
+    out = {}
+    for r in records:
+        idy = re.sub(r"\D", "", str(r.get("ID Yescapa", "")))
+        if not idy or str(r.get("Estado Meta", "")).strip().lower() == "cancelled":
+            continue
+        out[idy] = {
+            "ref_direta": str(r.get("ID", "")).strip(),
+            "nome": str(r.get("Hóspede Nome", "")).strip(),
+            "apelido": str(r.get("Hóspede Apelido", "")).strip(),
+            "email": str(r.get("Hóspede Email", "")).strip(),
+            "telefone": str(r.get("Hóspede Telefone", "")).strip(),
+        }
+    return out
+
+
+def aplicar_direta(booking: dict, override: Optional[dict]) -> dict:
+    """Junta à reserva Yescapa os contactos reais da reserva direta (campos vazios
+    no Painel ficam com o valor do Yescapa)."""
+    if not override:
+        return booking
+    b = dict(booking)
+    b["ref_direta"] = override.get("ref_direta", "")
+    b["email_yescapa"] = booking.get("email", "")
+    for k in ("nome", "apelido", "email", "telefone"):
+        if override.get(k):
+            b[k] = override[k]
+    return b
+
+
 def is_sendable(booking: dict) -> bool:
     return booking.get("estado_meta", "").lower() in SENDABLE_STATES
 
@@ -264,25 +303,45 @@ def normalizar_telefone(tel: str) -> str:
     return re.sub(r"\D", "", tel)
 
 
+def biografia(booking: dict) -> str:
+    ref = str(booking["ref"])
+    if booking.get("ref_direta"):
+        origem = f"Reserva direta {booking['ref_direta']} · Yescapa #{ref}"
+    elif not ref.isdigit():
+        origem = f"Reserva direta {ref}"
+    else:
+        origem = f"Reserva Yescapa #{ref}"
+    return (
+        f"{origem}\n"
+        f"{booking.get('veiculo', '')} ({booking.get('matricula', '')})\n"
+        f"Check-in: {booking.get('data_in', '')} · Check-out: {booking.get('data_out', '')}"
+    )
+
+
+def emails_payload(booking: dict) -> list:
+    """Email do cliente; numa reserva ligada, o alias Yescapa fica como 2.º email."""
+    out = []
+    if booking.get("email"):
+        out.append({"value": booking["email"]})
+    alias = booking.get("email_yescapa", "")
+    if alias and alias.lower() != booking.get("email", "").lower():
+        out.append({"value": alias, "type": "Yescapa"})
+    return out
+
+
 def criar_contacto(service, booking: dict) -> str:
     """Cria contacto no Google Contacts. Devolve o resourceName (people/c...)."""
     nome_completo = formatar_nome_contacto(booking)
     payload = {
         "names": [{"givenName": nome_completo}],
-        "biographies": [{
-            "value": (
-                f"Reserva Yescapa #{booking['ref']}\n"
-                f"{booking.get('veiculo', '')} ({booking.get('matricula', '')})\n"
-                f"Check-in: {booking.get('data_in', '')} · Check-out: {booking.get('data_out', '')}"
-            ),
-            "contentType": "TEXT_PLAIN",
-        }],
+        "biographies": [{"value": biografia(booking), "contentType": "TEXT_PLAIN"}],
     }
     tel = normalizar_telefone(booking.get("telefone", ""))
     if tel:
         payload["phoneNumbers"] = [{"value": tel}]
-    if booking.get("email"):
-        payload["emailAddresses"] = [{"value": booking["email"]}]
+    emails = emails_payload(booking)
+    if emails:
+        payload["emailAddresses"] = emails
     if CONTACTS_GROUP:
         payload["memberships"] = [{
             "contactGroupMembership": {"contactGroupResourceName": CONTACTS_GROUP},
@@ -292,8 +351,10 @@ def criar_contacto(service, booking: dict) -> str:
     return result.get("resourceName", "")
 
 
-def atualizar_contacto(service, resource_name: str, booking: dict):
-    """Atualiza um contacto existente (datas mudaram, p.ex.)."""
+def atualizar_contacto(service, resource_name: str, booking: dict,
+                       com_contactos: bool = False):
+    """Atualiza um contacto existente (datas mudaram, p.ex.). Com com_contactos,
+    substitui também telefone e emails (reserva direta ligada ao Yescapa)."""
     # People API exige get → modificar → update com etag e updatePersonFields
     current = service.people().get(
         resourceName=resource_name,
@@ -303,18 +364,17 @@ def atualizar_contacto(service, resource_name: str, booking: dict):
     body = {
         "etag": current["etag"],
         "names": [{"givenName": nome_completo}],
-        "biographies": [{
-            "value": (
-                f"Reserva Yescapa #{booking['ref']}\n"
-                f"{booking.get('veiculo', '')} ({booking.get('matricula', '')})\n"
-                f"Check-in: {booking.get('data_in', '')} · Check-out: {booking.get('data_out', '')}"
-            ),
-            "contentType": "TEXT_PLAIN",
-        }],
+        "biographies": [{"value": biografia(booking), "contentType": "TEXT_PLAIN"}],
     }
+    campos = "names,biographies"
+    if com_contactos:
+        tel = normalizar_telefone(booking.get("telefone", ""))
+        body["phoneNumbers"] = [{"value": tel}] if tel else []
+        body["emailAddresses"] = emails_payload(booking)
+        campos += ",phoneNumbers,emailAddresses"
     service.people().updateContact(
         resourceName=resource_name,
-        updatePersonFields="names,biographies",
+        updatePersonFields=campos,
         body=body,
     ).execute()
 
@@ -330,8 +390,18 @@ def run():
     state_ws = ensure_contacts_worksheet(spreadsheet)
 
     log("A ler folha Reservas...")
-    rows = reservas_ws.get_all_records()
+    rows = reservas_ws.get_all_records(numericise_ignore=["all"])
     log(f"  → {len(rows)} reservas")
+
+    try:
+        overrides = direct_overrides(
+            spreadsheet.worksheet(DIRECT_WORKSHEET).get_all_records(numericise_ignore=["all"])
+        )
+    except Exception as e:  # aba em falta ou erro de leitura → segue sem
+        log(f"  (sem reservas diretas ligadas: {e})")
+        overrides = {}
+    if overrides:
+        log(f"  → {len(overrides)} reserva(s) Yescapa com contactos da reserva direta")
 
     state_map = load_state(state_ws)
     log(f"  → {len(state_map)} entradas de estado Contactos")
@@ -348,6 +418,7 @@ def run():
 
     for row in rows:
         booking = reservas_to_booking(row)
+        booking = aplicar_direta(booking, overrides.get(booking["ref"]))
         bid = booking["ref"]
         if not bid:
             ignorados += 1
@@ -369,8 +440,12 @@ def run():
         nome_alvo = formatar_nome_contacto(booking)
 
         # SAFEGUARD 2: se já tem resource_name → atualizar
+        # Reserva Yescapa ligada a uma direta: o estado leva "_direta" depois de o
+        # telefone/email do Painel substituírem uma vez os do Yescapa.
         if existing and existing.get("resource_name"):
-            if existing.get("nome_contacto") == nome_alvo:
+            ligada = bool(booking.get("ref_direta"))
+            falta_direta = ligada and "_direta" not in existing.get("estado", "")
+            if existing.get("nome_contacto") == nome_alvo and not falta_direta:
                 ignorados += 1
                 continue  # nada mudou
             if DRY_RUN:
@@ -378,9 +453,11 @@ def run():
                 atualizados += 1
                 continue
             try:
-                atualizar_contacto(people_service, existing["resource_name"], booking)
+                atualizar_contacto(people_service, existing["resource_name"], booking,
+                                   com_contactos=falta_direta)
                 upsert_state(
-                    state_ws, state_map, bid, f"auto_atualizado_{now_iso()}",
+                    state_ws, state_map, bid,
+                    f"auto_atualizado{'_direta' if ligada else ''}_{now_iso()}",
                     nome_contacto=nome_alvo, resource_name=existing["resource_name"],
                 )
                 log(f"  ✎ #{bid}: atualizado → '{nome_alvo}'")
@@ -420,7 +497,8 @@ def run():
         try:
             resource_name = criar_contacto(people_service, booking)
             upsert_state(
-                state_ws, state_map, bid, f"auto_criado_{now_iso()}",
+                state_ws, state_map, bid,
+                f"auto_criado{'_direta' if booking.get('ref_direta') else ''}_{now_iso()}",
                 nome_contacto=nome_alvo, resource_name=resource_name,
             )
             log(f"  ✓ #{bid}: criado '{nome_alvo}' ({resource_name})")
