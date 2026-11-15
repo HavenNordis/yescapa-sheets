@@ -50,3 +50,26 @@ def test_so_direta_e_multivan_prata():
     b = reservas_to_booking({**YESCAPA_ROW, "ID": "RD261026123344", "Matrícula": "BC-06-NP"})
     assert biografia(b).startswith("Reserva direta RD261026123344\n")
     assert "· Freya ·" in formatar_nome_contacto(b)
+
+
+from google_contacts_sync import pending_bookings
+
+PENDING_ROWS = [
+    {"ID": "RD261113130152", "Nome": "Maria do Carmo", "Apelido": "", "Telefone": "+351 935 043 092",
+     "Email": "", "Veículo": "Fjord", "Matrícula": "CF-68-JJ",
+     "Data Início": "20/11/2026", "Data Fim": "22/11/2026", "Estado": "ativa"},
+    {"ID": "RD261102221059", "Nome": "Carlos", "Telefone": "+55", "Estado": "ativa"},   # ligada
+    {"ID": "RD261026123344", "Nome": "Já", "Telefone": "+351", "Estado": "ativa"},      # já na Reservas
+    {"ID": "RD261101000001", "Nome": "Cancelada", "Telefone": "+351", "Estado": "cancelada"},
+    {"ID": "RD261101000002", "Nome": "Sem contactos", "Telefone": "", "Email": "", "Estado": "ativa"},
+]
+
+
+def test_pendentes_so_as_por_confirmar():
+    ov = {"3799211": {"ref_direta": "RD261102221059"}}
+    out = pending_bookings(PENDING_ROWS, {"RD261026123344", "3799211"}, ov)
+    assert [b["ref"] for b in out] == ["RD261113130152"]
+    b = out[0]
+    assert b["pendente"] and b["estado_meta"] == "confirmed"
+    assert formatar_nome_contacto(b) == "Maria Carmo · Fjord · 20/11–22/11"
+    assert biografia(b).startswith("Reserva direta RD261113130152 (por confirmar)")

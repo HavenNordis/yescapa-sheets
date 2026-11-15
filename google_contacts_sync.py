@@ -50,6 +50,9 @@ SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 RESERVAS_WORKSHEET = os.getenv("WORKSHEET_NAME", "Reservas")
 CONTACTS_WORKSHEET = os.getenv("CONTACTS_WORKSHEET", "Contactos")
 DIRECT_WORKSHEET = os.getenv("DIRECT_WORKSHEET", "Reservas Diretas")
+# Reservas diretas acabadas de criar no Painel (ainda sem confirmação): o Painel
+# escreve aqui nome/telefone para o contacto existir logo (mandar o formulário).
+PENDING_WORKSHEET = os.getenv("DIRECT_CONTACTS_WORKSHEET", "Contactos Diretos")
 
 CONTACTS_CLIENT_ID = os.getenv("CONTACTS_CLIENT_ID")
 CONTACTS_CLIENT_SECRET = os.getenv("CONTACTS_CLIENT_SECRET")
@@ -208,6 +211,33 @@ def aplicar_direta(booking: dict, override: Optional[dict]) -> dict:
     return b
 
 
+def pending_bookings(records: list, ids_reservas: set, overrides: dict) -> list:
+    """Linhas da aba 'Contactos Diretos' que ainda não estão na Reservas nem ligadas
+    a uma reserva Yescapa → reservas 'pendentes' para criar já o contacto."""
+    ligadas = {o.get("ref_direta") for o in overrides.values()}
+    out = []
+    for r in records:
+        rid = str(r.get("ID", "")).strip()
+        if not rid or rid in ids_reservas or rid in ligadas:
+            continue
+        if str(r.get("Estado", "")).strip().lower() == "cancelada":
+            continue
+        if not (str(r.get("Telefone", "")).strip() or str(r.get("Email", "")).strip()):
+            continue
+        out.append({
+            "ref": rid, "estado_meta": "confirmed", "pendente": True,
+            "nome": str(r.get("Nome", "")).strip(),
+            "apelido": str(r.get("Apelido", "")).strip(),
+            "email": str(r.get("Email", "")).strip(),
+            "telefone": str(r.get("Telefone", "")).strip(),
+            "veiculo": str(r.get("Veículo", "")).strip(),
+            "matricula": str(r.get("Matrícula", "")).strip(),
+            "data_in": str(r.get("Data Início", "")).strip(),
+            "data_out": str(r.get("Data Fim", "")).strip(),
+        })
+    return out
+
+
 def is_sendable(booking: dict) -> bool:
     return booking.get("estado_meta", "").lower() in SENDABLE_STATES
 
@@ -305,7 +335,9 @@ def normalizar_telefone(tel: str) -> str:
 
 def biografia(booking: dict) -> str:
     ref = str(booking["ref"])
-    if booking.get("ref_direta"):
+    if booking.get("pendente"):
+        origem = f"Reserva direta {ref} (por confirmar)"
+    elif booking.get("ref_direta"):
         origem = f"Reserva direta {booking['ref_direta']} · Yescapa #{ref}"
     elif not ref.isdigit():
         origem = f"Reserva direta {ref}"
@@ -406,6 +438,20 @@ def run():
     state_map = load_state(state_ws)
     log(f"  → {len(state_map)} entradas de estado Contactos")
 
+    bookings = [aplicar_direta(b, overrides.get(b["ref"]))
+                for b in (reservas_to_booking(r) for r in rows)]
+    try:
+        pendentes = pending_bookings(
+            spreadsheet.worksheet(PENDING_WORKSHEET).get_all_records(numericise_ignore=["all"]),
+            {b["ref"] for b in bookings}, overrides,
+        )
+    except Exception as e:  # aba em falta → segue sem
+        log(f"  (sem reservas diretas por confirmar: {e})")
+        pendentes = []
+    if pendentes:
+        log(f"  → {len(pendentes)} reserva(s) direta(s) por confirmar")
+    bookings += pendentes
+
     people_service = None
     if not DRY_RUN:
         log("A inicializar People API...")
@@ -416,15 +462,18 @@ def run():
     falhados = 0
     ignorados = 0
 
-    for row in rows:
-        booking = reservas_to_booking(row)
-        booking = aplicar_direta(booking, overrides.get(booking["ref"]))
+    for booking in bookings:
         bid = booking["ref"]
         if not bid:
             ignorados += 1
             continue
 
         existing = state_map.get(str(bid))
+        # reserva Yescapa ligada a uma direta cujo contacto já foi criado quando a
+        # reserva direta foi criada no Painel → reaproveita esse contacto
+        ref_d = booking.get("ref_direta")
+        if not existing and ref_d and (state_map.get(ref_d) or {}).get("resource_name"):
+            existing = {**state_map[ref_d], "estado": "herdado"}
         estado_atual = (existing or {}).get("estado", "").strip()
 
         # SAFEGUARD 1: só reservas confirmadas
@@ -439,13 +488,19 @@ def run():
 
         nome_alvo = formatar_nome_contacto(booking)
 
+        pendente = bool(booking.get("pendente"))
+        direta = bool(ref_d) or not str(bid).isdigit()
+        marca = "_pendente" if pendente else ("_direta" if direta else "")
+
         # SAFEGUARD 2: se já tem resource_name → atualizar
-        # Reserva Yescapa ligada a uma direta: o estado leva "_direta" depois de o
-        # telefone/email do Painel substituírem uma vez os do Yescapa.
+        # Reserva direta (só direta ou ligada ao Yescapa) já confirmada: o estado leva
+        # "_direta" depois de o telefone/email do Painel serem escritos uma vez.
+        # Por confirmar: telefone/email reescritos sempre que o nome muda.
         if existing and existing.get("resource_name"):
-            ligada = bool(booking.get("ref_direta"))
-            falta_direta = ligada and "_direta" not in existing.get("estado", "")
-            if existing.get("nome_contacto") == nome_alvo and not falta_direta:
+            falta_direta = (direta and not pendente
+                            and "_direta" not in existing.get("estado", ""))
+            mudou = existing.get("nome_contacto") != nome_alvo
+            if not mudou and not falta_direta:
                 ignorados += 1
                 continue  # nada mudou
             if DRY_RUN:
@@ -454,10 +509,10 @@ def run():
                 continue
             try:
                 atualizar_contacto(people_service, existing["resource_name"], booking,
-                                   com_contactos=falta_direta)
+                                   com_contactos=falta_direta or (pendente and mudou))
                 upsert_state(
                     state_ws, state_map, bid,
-                    f"auto_atualizado{'_direta' if ligada else ''}_{now_iso()}",
+                    f"auto_atualizado{marca}_{now_iso()}",
                     nome_contacto=nome_alvo, resource_name=existing["resource_name"],
                 )
                 log(f"  ✎ #{bid}: atualizado → '{nome_alvo}'")
@@ -498,7 +553,7 @@ def run():
             resource_name = criar_contacto(people_service, booking)
             upsert_state(
                 state_ws, state_map, bid,
-                f"auto_criado{'_direta' if booking.get('ref_direta') else ''}_{now_iso()}",
+                f"auto_criado{marca}_{now_iso()}",
                 nome_contacto=nome_alvo, resource_name=resource_name,
             )
             log(f"  ✓ #{bid}: criado '{nome_alvo}' ({resource_name})")
