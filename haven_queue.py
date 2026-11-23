@@ -108,6 +108,32 @@ def classify(result: dict) -> str:
     return "retry"
 
 
+def _safe(v, limit=60) -> str:
+    """Só letras, dígitos e pontuação simples: nunca corpo bruto nem segredos."""
+    s = "".join(c if (c.isalnum() or c in " _-.:/()!=") else "?" for c in str(v or ""))
+    return s[:limit] or "-"
+
+
+def _log_delivery(action: str, result, code: str, attempts: int) -> None:
+    """Uma linha por tentativa de entrega ao Haven Desk, para os registos do
+    Railway: o que o Desk respondeu (HTTP + código) ou porque não se enviou.
+    Nunca levanta e nunca escreve URL, token, corpo ou dados de reservas."""
+    try:
+        r = result if isinstance(result, dict) else {}
+        if r.get("skipped"):
+            detalhe = "nao enviado: " + _safe(r.get("reason"))
+            if r.get("erros"):
+                detalhe += " | " + _safe(r["erros"][0], 100)
+        elif "http" in r:
+            detalhe = f"http={_safe(r.get('http'), 5)} codigo={_safe(code)}"
+        else:
+            detalhe = "sem resposta: " + _safe(r.get("error_code") or "resultado invalido")
+        print(f"[haven] entrega: acao={_safe(action, 12)} {detalhe} tentativa={int(attempts)}",
+              flush=True)
+    except Exception:
+        pass
+
+
 def _code_of(result: dict) -> str:
     body = (result or {}).get("response") or {}
     return str(body.get("code") or body.get("status") or "")
@@ -218,6 +244,7 @@ class HavenQueue:
             action = classify(result)
             it["last_action"] = action
             code = _code_of(result) if isinstance(result, dict) else ""
+            _log_delivery(action, result, code, it["attempts"])
 
             if action == "done":
                 it["status"] = "done"
