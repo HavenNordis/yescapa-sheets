@@ -140,8 +140,9 @@ def _code_of(result: dict) -> str:
 
 
 class HavenQueue:
-    def __init__(self, path: str):
+    def __init__(self, path: str, snapshot_field: str = "source_snapshot_at"):
         self.path = path
+        self.snapshot_field = snapshot_field
         self.corrupt_quarantined = None
         self._items = self._load()
 
@@ -187,7 +188,7 @@ class HavenQueue:
             return False
         rec = {
             "event_id": eid,
-            "source_snapshot_at": envelope["source_snapshot_at"],
+            "source_snapshot_at": envelope[self.snapshot_field],
             "envelope": envelope,          # conteúdo imutável
             "status": "pending",
             "attempts": 0,
