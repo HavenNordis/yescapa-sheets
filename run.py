@@ -132,6 +132,11 @@ def run_vv():
     Joana carrega em "Atualizar passagens Via Verde".
     Falha em silêncio — não interrompe o cron.
     """
+    try:
+        from via_verde_delivery import flush
+        flush()
+    except Exception as error:
+        log(f"Entrega Via Verde pendente: {type(error).__name__}")
     from zoneinfo import ZoneInfo
     now_lisbon = datetime.now(ZoneInfo("Europe/Lisbon"))
     if not (now_lisbon.hour in (9, 12, 15, 18, 21) and now_lisbon.minute < 15):

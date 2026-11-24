@@ -1,7 +1,7 @@
 """
 vv_runner.py — Via Verde movement scraper
 
-Corre diariamente (chamado por run.py às 19h30 Lisboa).
+Corre nos horários definidos em run.py; reenvia a fila em cada ciclo.
 Para cada reserva activa (checkin-1 a checkout+3 dias):
   1. Acede ao portal viaverde.pt (empresas)
   2. Filtra movimentos por matrícula + período da reserva
@@ -54,7 +54,7 @@ GMAIL_REFRESH_TOKEN = os.environ.get("GMAIL_REFRESH_TOKEN")
 
 VV_EMAIL = os.environ.get("VV_EMAIL", "")
 VV_PASSWORD = os.environ.get("VV_PASSWORD", "")
-VV_URL = "https://www.viaverde.pt/empresas/minha-via-verde/extratos-movimentos"
+VV_URL = "https://www.viaverde.pt/empresas/minha-via-verde/ExtratoseMovimentos"
 
 GOOGLE_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", "Reservas Yescapa")
 APP_SHEET_NAME = os.environ.get("APP_SHEET_NAME", "Haven Nordis · App (Tarefas e Manutenções)")
@@ -197,7 +197,7 @@ def get_vv_pass_ws(app_ss):
 
 def upsert_passages(app_ss, passages, plate):
     """Insere passagens em VV_Passagens sem associação a reservas.
-    Chave de upsert: (data, local, matricula).
+    Chave de upsert: (data, hora, local, matricula).
     Nunca sobrescreve incluir/notas — preserva decisões do staff.
 
     Devolve a lista das passagens REALMENTE novas (inseridas neste run), cada uma
@@ -218,20 +218,29 @@ def upsert_passages(app_ss, passages, plate):
     def hcol(name):
         return headers.index(name) if name in headers else -1
 
-    # Índice de chaves existentes: (data, local, matricula) → row index (2-based)
+    if any(hcol(name) < 0 for name in ("data", "hora", "local", "matricula", "valor")):
+        raise RuntimeError("Colunas de movimentos Via Verde incompletas")
+    # A mesma portagem em horas diferentes são passagens diferentes.
     existing = {}
+    missing_time = set()
     for i, row in enumerate(all_vals[1:], start=2):
+        row = row + [""] * max(0, len(headers) - len(row))
         key = (
             row[hcol("data")]      if hcol("data")      >= 0 else "",
+            row[hcol("hora")].strip(),
             row[hcol("local")]     if hcol("local")     >= 0 else "",
-            row[hcol("matricula")] if hcol("matricula") >= 0 else "",
+            normalize_plate(row[hcol("matricula")]),
         )
+        if not key[1]:
+            missing_time.add((key[0], key[2], key[3]))
         existing[key] = i
 
     new_passages = []
     for px in passages:
         date_str = px["date"].strftime("%d/%m/%Y")
-        key = (date_str, px["location"], plate)
+        key = (date_str, px.get("hora", ""), px["location"], normalize_plate(plate))
+        if not key[1] or (key[0], key[2], key[3]) in missing_time:
+            raise RuntimeError("Passagem histórica sem hora exige reconciliação")
 
         if key not in existing:
             new_row = [""] * len(headers)
@@ -250,6 +259,8 @@ def upsert_passages(app_ss, passages, plate):
                 if c >= 0:
                     new_row[c] = val
             ws.append_row(new_row, value_input_option="USER_ENTERED")
+            existing[key] = len(all_vals) + 1
+            all_vals.append(new_row)
             new_passages.append({
                 "date": px["date"], "hora": px.get("hora", ""),
                 "location": px["location"], "amount": px["amount"], "plate": plate,
@@ -350,18 +361,21 @@ def write_vv(app_ss, bid, vv_total, vv_obs):
 
 def _set_angular(page, selector, value):
     """Escreve num input Angular sem que o framework ignore a mudança."""
-    page.evaluate(
+    applied = page.evaluate(
         """([sel, val]) => {
             const el = document.querySelector(sel);
-            if (!el) return;
+            if (!el) return false;
             const setter = Object.getOwnPropertyDescriptor(
                 window.HTMLInputElement.prototype, 'value').set;
             setter.call(el, val);
             ['input', 'change', 'keyup'].forEach(ev =>
                 el.dispatchEvent(new Event(ev, {bubbles: true})));
+            return el.value === val;
         }""",
         [selector, value],
     )
+    if applied is not True:
+        raise RuntimeError("Filtro Via Verde ausente ou não aplicado")
 
 
 class _HiddenFieldParser(HTMLParser):
@@ -380,7 +394,7 @@ def _login(page):
     """Faz login via AJAX API do Via Verde e transfere cookies para Playwright."""
     api_url = (
         "https://www.viaverde.pt/DesktopModules/UserLogin/Api.ashx"
-        "?returnurl=%2fempresas%2fminha-via-verde%2fextratos-movimentos"
+        "?returnurl=%2fempresas%2fminha-via-verde%2fExtratoseMovimentos"
     )
     ua = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -405,7 +419,7 @@ def _login(page):
         "rememberMe": "true",
         "lang": "pt-PT",
         "forceVVS": "false",
-        "savedUrl": "%2fempresas%2fminha-via-verde%2fextratos-movimentos",
+        "savedUrl": "%2fempresas%2fminha-via-verde%2fExtratoseMovimentos",
     }, timeout=30)
 
     if resp.status_code != 200:
@@ -413,10 +427,10 @@ def _login(page):
 
     try:
         result = resp.json()
-        if not result.get("success") and not result.get("redirectUrl"):
-            raise RuntimeError(f"Login recusado: {result}")
-    except Exception:
-        pass  # Alguns respostas não são JSON
+    except ValueError as error:
+        raise RuntimeError("Login sem resposta JSON válida") from error
+    if not isinstance(result, dict) or (result.get("success") is not True and not result.get("redirectUrl")):
+        raise RuntimeError("Login recusado pela Via Verde")
 
     # Transferir cookies para o contexto Playwright
     playwright_cookies = []
@@ -428,7 +442,10 @@ def _login(page):
             "path": c.path or "/",
         })
     page.context.add_cookies(playwright_cookies)
-    log(f"  ✓ Login efectuado (AJAX API, {len(playwright_cookies)} cookies)")
+    page.goto(VV_URL, wait_until="networkidle")
+    if not _is_logged_in(page):
+        raise RuntimeError("Sessão Via Verde não confirmada após login")
+    log("  ✓ Sessão Via Verde confirmada")
 
 
 def _is_logged_in(page):
@@ -476,17 +493,17 @@ def scrape_movements(page, plate, date_from, date_to):
     try:
         _set_angular(page, 'input.input[placeholder=" "]', plate)
         time.sleep(0.3)
-    except Exception:
-        log("  ⚠ Não foi possível preencher o filtro de matrícula")
+    except Exception as error:
+        raise RuntimeError("Não foi possível preencher o filtro de matrícula") from error
 
     # Filtro: datas — 2 datepickers dentro de div.filter-expanded-wrapper
     from_str = date_from.strftime("%d/%m/%Y")
     to_str = date_to.strftime("%d/%m/%Y")
-    page.evaluate(
+    dates_applied = page.evaluate(
         """([from_s, to_s]) => {
             const dps = document.querySelectorAll(
                 'div.filter-expanded-wrapper input.datepicker');
-            if (dps.length < 2) return;
+            if (dps.length < 2) return false;
             function set(inp, val) {
                 const s = Object.getOwnPropertyDescriptor(
                     window.HTMLInputElement.prototype, 'value').set;
@@ -496,9 +513,12 @@ def scrape_movements(page, plate, date_from, date_to):
             }
             set(dps[0], from_s);
             set(dps[1], to_s);
+            return dps[0].value === from_s && dps[1].value === to_s;
         }""",
         [from_str, to_str],
     )
+    if dates_applied is not True:
+        raise RuntimeError("Filtro de datas Via Verde não confirmado")
     time.sleep(0.3)
 
     # Botão "Filtrar" — JS click no último (evita conflito com duplicado escondido do Extratos)
@@ -511,11 +531,11 @@ def scrape_movements(page, plate, date_from, date_to):
             return true;
         })()""")
         if not clicked:
-            log("  ⚠ Botão Filtrar não encontrado na página")
+            raise RuntimeError("Botão Filtrar não encontrado; consulta não validada")
         page.wait_for_load_state("networkidle")
         time.sleep(2)
     except Exception as e:
-        log(f"  ⚠ Erro ao clicar Filtrar: {e}")
+        raise RuntimeError("Não foi possível aplicar os filtros Via Verde") from e
 
     # Carregar todos os resultados (cap alto p/ suportar backfill de meses)
     for _ in range(120):
@@ -526,15 +546,17 @@ def scrape_movements(page, plate, date_from, date_to):
             btn.click()
             page.wait_for_load_state("networkidle")
             time.sleep(1)
-        except Exception:
-            break
+        except Exception as error:
+            raise RuntimeError("Paginação Via Verde incompleta") from error
+    else:
+        raise RuntimeError("Limite de paginação Via Verde atingido; consulta incompleta")
 
     # Extrair linhas da tabela de movimentos (2.ª tabela com class theme-default-table)
     rows_data = page.evaluate(
         """() => {
             const tables = document.querySelectorAll('table.theme-default-table');
             const t = tables[tables.length - 1];
-            if (!t) return [];
+            if (!t) return null;
             const out = [];
             t.querySelectorAll('tbody tr').forEach(tr => {
                 const cells = tr.querySelectorAll('td');
@@ -549,6 +571,8 @@ def scrape_movements(page, plate, date_from, date_to):
         }"""
     )
 
+    if rows_data is None:
+        raise RuntimeError("Tabela de movimentos ausente; consulta não validada")
     passages = []
     for row in rows_data:
         if normalize_plate(row.get("plate", "")) != plate_norm:
@@ -558,7 +582,7 @@ def scrape_movements(page, plate, date_from, date_to):
         # Data no formato YYYY-MM-DD dentro da descrição
         m = re.search(r"(\d{4}-\d{2}-\d{2})", desc)
         if not m:
-            continue
+            raise RuntimeError("Movimento Via Verde sem data reconhecida")
         row_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
         if not (date_from <= row_date <= date_to):
             continue
@@ -566,6 +590,8 @@ def scrape_movements(page, plate, date_from, date_to):
         # Hora HH:MM
         hm = re.search(r"(\d{2}:\d{2})", desc)
         hora = hm.group(1) if hm else ""
+        if not hora:
+            raise RuntimeError("Movimento Via Verde sem hora reconhecida")
 
         # Valor faturado — parse robusto (Decimal, HALF_UP, sem truncar; ver parse_eur).
         # NB: para portagens estrangeiras (Espanha/Galiza) a vista Movimentos mostra o
@@ -819,6 +845,7 @@ def main():
                 return "error: login failed"
 
         all_new = []
+        captured_passages = {}
         for plate in VEHICLES.values():
             log(f"  → {plate} | {date_from.strftime('%d/%m/%Y')}–{date_to.strftime('%d/%m/%Y')}")
             try:
@@ -827,7 +854,12 @@ def main():
                 log(f"  ✗ Erro ao fazer scraping de {plate}: {e}")
                 continue
 
-            new_px = upsert_passages(app_ss, passages, plate)
+            captured_passages[plate] = passages
+            try:
+                new_px = upsert_passages(app_ss, passages, plate)
+            except Exception as error:
+                log(f"  ✗ Escrita na folha falhou: {type(error).__name__}")
+                new_px = []
             log(f"    {len(passages)} passagem(ns), {len(new_px)} nova(s)")
             all_new.extend(new_px)
             processed += 1
@@ -835,12 +867,22 @@ def main():
         browser.close()
 
     # Fecha o backfill: marca como feito para os próximos varrimentos voltarem a 60 dias.
-    if doing_backfill and processed > 0:
+    if doing_backfill and processed == len(VEHICLES):
         try:
             _mark_backfill_done(app_ss)
             log("  ✓ backfill único concluído — próximos varrimentos voltam a 60 dias")
         except Exception as e:
             log(f"  ⚠ não consegui marcar backfill_done ({type(e).__name__}: {e})")
+
+    if processed == len(VEHICLES):
+        try:
+            from via_verde_delivery import deliver
+            delivery = deliver(captured_passages, date_from, date_to)
+            log(f"Entrega ao Desk: {delivery}")
+        except Exception as error:
+            log(f"  ✗ Entrega ao Desk não confirmada: {type(error).__name__}")
+    else:
+        log("Consulta incompleta: não confirma ausência de portagens nem cobertura ao Desk")
 
     # Alerta: portagens que entraram agora mas pertencem a reservas já terminadas.
     # Desligado durante o backfill (janela larga) para não spammar ops@.
@@ -852,7 +894,7 @@ def main():
         except Exception as e:
             log(f"  ⚠ alerta: erro inesperado ({type(e).__name__}: {e})")
 
-    return f"ok: {processed} matrícula(s) processada(s)"
+    return f"{'ok' if processed == len(VEHICLES) else 'error: incomplete capture'}: {processed}/{len(VEHICLES)} matrícula(s) processada(s)"
 
 
 if __name__ == "__main__":
